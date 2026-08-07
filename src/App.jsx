@@ -26,22 +26,54 @@ import {
   ChevronDown,
   Search,
   Lock,
+  Moon,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Landmark,
+  Smartphone,
+  QrCode,
+  Copy,
+  ArrowLeftRight,
 } from "lucide-react";
 
 /* ---------- Design tokens ---------- */
-const T = {
-  ink: "#FBF8F2", // milky off-white — main background
-  ink2: "#FFFFFF", // card / elevated surface
-  ink3: "#EDE4D3", // hairline borders, dividers, rail line, off states
-  paper: "#2E2A22", // primary text (dark, on the light background)
-  paperDim: "#A79E8C",
-  gold: "#8B5CF6", // primary accent — vivid violet, the "pop" color
-  goldSoft: "#FFC93C", // sunny yellow accent
-  ok: "#1FC28B", // success / paid — bright teal-green
-  warn: "#FF6B5B", // alerts — vivid coral
-  blue: "#4C8EFF", // extra accent for variety
-  muted: "#9C927F", // secondary text
+const PALETTES = {
+  light: {
+    ink: "#FBF8F2", // milky off-white — main background
+    ink2: "#FFFFFF", // card / elevated surface
+    ink3: "#EDE4D3", // hairline borders, dividers, rail line, off states
+    paper: "#2E2A22", // primary text (dark, on the light background)
+    paperDim: "#A79E8C",
+    gold: "#8B5CF6", // primary accent — vivid violet, the "pop" color
+    goldSoft: "#FFC93C", // sunny yellow accent
+    ok: "#1FC28B", // success / paid — bright teal-green
+    warn: "#FF6B5B", // alerts — vivid coral
+    blue: "#4C8EFF", // extra accent for variety
+    muted: "#9C927F", // secondary text
+  },
+  dark: {
+    ink: "#0B1120", // near-black navy — main background
+    ink2: "#141B2E", // card / elevated surface
+    ink3: "#232B42", // hairline borders, dividers, rail line, off states
+    paper: "#F1F5F9", // primary text (near-white, on the dark background)
+    paperDim: "#94A3B8",
+    gold: "#A3E635", // primary accent — lime green, the "pop" color
+    goldSoft: "#FDE047", // warm yellow accent
+    ok: "#34D399", // success / paid
+    warn: "#FB7185", // alerts
+    blue: "#60A5FA", // extra accent for variety
+    muted: "#7C8AA5", // secondary text
+  },
 };
+// T is intentionally a mutable object rather than a fresh one per theme —
+// every component reads T.xxx at render time via plain property access, so
+// applyTheme() below can just overwrite its fields in place and the whole
+// tree picks up the new colors on next render, without threading a theme
+// value through every component's props.
+let T = { ...PALETTES.light };
+function applyTheme(isDark) {
+  Object.assign(T, isDark ? PALETTES.dark : PALETTES.light);
+}
 
 const FONT_DISPLAY = "'Fredoka', 'Baloo 2', system-ui, sans-serif";
 const FONT_BODY = "'Nunito', system-ui, -apple-system, sans-serif";
@@ -49,14 +81,20 @@ const FONT_MONO = "'IBM Plex Mono', ui-monospace, Menlo, monospace";
 
 const CATEGORIES = ["Housing", "Utilities", "Entertainment", "Savings", "Transport", "Other"];
 const PAYSTACK_PUBLIC_KEY = "pk_test_b8acc1eeb9f5b9140c1f20c56c426c16d3598add";
-const CATEGORY_COLOR = {
-  Housing: T.gold,
-  Utilities: T.ok,
-  Entertainment: T.warn,
-  Savings: T.goldSoft,
-  Transport: T.blue,
-  Other: T.muted,
-};
+// A function rather than a frozen object — CATEGORY_COLOR used to capture T's
+// hex values once at module load, so it never updated when the theme changed.
+function categoryColor(category) {
+  return (
+    {
+      Housing: T.gold,
+      Utilities: T.ok,
+      Entertainment: T.warn,
+      Savings: T.goldSoft,
+      Transport: T.blue,
+      Other: T.muted,
+    }[category] || T.muted
+  );
+}
 
 /* ---------- Helpers ---------- */
 function naira(n) {
@@ -88,6 +126,49 @@ function daysAway(iso) {
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
+// Nigerian transfer pricing works the other way round from most fee models:
+// the bank advertises a flat charge (₦10/₦25/₦50 by band) which is already
+// VAT-inclusive, so the fee and the 7.5% VAT are back-derived from it rather
+// than added on top. That's why the split lands on odd figures like 8.37 +
+// 0.63 rather than a round number.
+const VAT_RATE = 0.075;
+function transferCharge(amount) {
+  const a = Number(amount) || 0;
+  const flat = a <= 5000 ? 10 : a <= 50000 ? 25 : 50;
+  const fee = Math.round((flat / (1 + VAT_RATE)) * 100) / 100;
+  const vat = Math.round((flat - fee) * 100) / 100;
+  return { fee, vat, charge: flat, total: a + flat };
+}
+function nairaExact(n) {
+  return (
+    "₦" +
+    Number(n || 0).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  );
+}
+
+// On mobile browsers the on-screen keyboard shrinks the visual viewport but
+// leaves layout height untouched, so a bottom sheet ends up hidden behind the
+// keyboard. visualViewport tells us how much is covered; sheets add that as
+// bottom padding so the focused field stays visible.
+function useKeyboardInset() {
+  const [inset, setInset] = useState(0);
+  useEffect(() => {
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    if (!vv) return;
+    const update = () => {
+      const covered = window.innerHeight - vv.height - vv.offsetTop;
+      setInset(covered > 80 ? covered : 0);
+    };
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    update();
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
+  return inset;
+}
 
 function defaultSettings() {
   return {
@@ -100,6 +181,8 @@ function defaultSettings() {
     hasPin: false,
     biometricRegistered: false,
     totalBalance: 0,
+    darkMode: false,
+    cardLinkSkipped: false,
   };
 }
 function mapProfile(row) {
@@ -112,6 +195,8 @@ function mapProfile(row) {
     avatarUrl: row.avatar_url,
     hasPin: row.has_pin,
     totalBalance: Number(row.total_balance || 0),
+    darkMode: !!row.dark_mode,
+    cardLinkSkipped: !!row.card_link_skipped,
   };
 }
 function unmapSettings(partial) {
@@ -123,13 +208,15 @@ function unmapSettings(partial) {
   if ("cardLast4" in partial) out.card_last4 = partial.cardLast4;
   if ("avatarUrl" in partial) out.avatar_url = partial.avatarUrl;
   if ("totalBalance" in partial) out.total_balance = partial.totalBalance;
+  if ("darkMode" in partial) out.dark_mode = partial.darkMode;
+  if ("cardLinkSkipped" in partial) out.card_link_skipped = partial.cardLinkSkipped;
   return out;
 }
 
 /* ---------- Shared bits ---------- */
 function AppHeader({ title, onProfile, avatarUrl, name }) {
   return (
-    <div className="flex items-center justify-between px-5 pt-6 pb-3">
+    <div className="rota-header-safe flex items-center justify-between px-5 pb-3">
       <h1 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold">
         {title}
       </h1>
@@ -160,8 +247,8 @@ function TabBar({ tab, setTab }) {
   ];
   return (
     <div
-      className="flex items-center justify-between px-3"
-      style={{ background: T.ink2, borderTop: `1px solid ${T.ink3}`, paddingTop: 10, paddingBottom: 14 }}
+      className="rota-tabbar-safe lg:hidden flex items-center justify-between px-3 flex-shrink-0 fixed bottom-0 left-0 right-0"
+      style={{ background: T.ink2, borderTop: `1px solid ${T.ink3}`, paddingTop: 10, zIndex: 15 }}
     >
       {items.map(({ key, label, Icon }) => {
         const active = tab === key;
@@ -185,19 +272,691 @@ function TabBar({ tab, setTab }) {
   );
 }
 
+// Desktop counterpart to TabBar — a fixed-width sidebar shown from the lg
+// breakpoint up, replacing the bottom bar so the extra horizontal space on
+// a laptop/desktop screen goes toward real navigation, not empty margin.
+function SideNav({ tab, setTab }) {
+  const items = [
+    { key: "home", label: "Home", Icon: HomeIcon },
+    { key: "schedule", label: "Schedule", Icon: Calendar },
+    { key: "todo", label: "To-Do", Icon: CheckSquare },
+    { key: "advisor", label: "Advisor", Icon: Sparkles },
+    { key: "profile", label: "Profile", Icon: User },
+  ];
+  return (
+    <div
+      className="hidden lg:flex flex-col flex-shrink-0"
+      style={{ width: 220, background: T.ink2, borderRight: `1px solid ${T.ink3}`, padding: "24px 12px" }}
+    >
+      <div className="flex items-center gap-2 px-2 mb-8">
+        <div
+          className="rounded-full flex items-center justify-center flex-shrink-0"
+          style={{ width: 30, height: 30, background: T.gold }}
+        >
+          <Wallet size={15} color={T.ink} />
+        </div>
+        <span style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-base font-semibold">
+          Rota
+        </span>
+      </div>
+      <div className="flex flex-col gap-1">
+        {items.map(({ key, label, Icon }) => {
+          const active = tab === key;
+          return (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors"
+              style={{ background: active ? T.ink3 : "transparent" }}
+            >
+              <Icon size={18} color={active ? T.gold : T.muted} strokeWidth={active ? 2.4 : 2} />
+              <span
+                className="text-sm"
+                style={{ fontFamily: FONT_BODY, color: active ? T.gold : T.muted, fontWeight: active ? 600 : 500 }}
+              >
+                {label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CategoryChip({ category }) {
   return (
     <span className="inline-flex items-center gap-1.5 text-xs" style={{ fontFamily: FONT_BODY, color: T.muted }}>
-      <span className="rounded-full" style={{ width: 6, height: 6, background: CATEGORY_COLOR[category] || T.muted }} />
+      <span className="rounded-full" style={{ width: 6, height: 6, background: categoryColor(category) }} />
       {category}
     </span>
+  );
+}
+
+/* ---------- Add Money / Send Money ---------- */
+// The two directions money moves through a user's Paystack Dedicated
+// Virtual Account: funds arriving via any of the usual Nigerian rails
+// (bank transfer, card top-up, USSD, QR), and funds leaving via a P2P
+// send that draws on the wallet balance instead of charging a linked
+// card. Every path here calls the dva-wallet-action function, which a
+// real Paystack webhook / Transfers API call triggers in production.
+
+// Demonstrates the two directions money moves once a Paystack Dedicated
+// Virtual Account is wired directly into Rota's Home tab: funds arriving
+// via any of the usual Nigerian rails (bank transfer, card top-up, USSD,
+// QR), and funds leaving via a P2P send that draws on the wallet balance
+// instead of charging a linked card. Every path here calls the same
+// dva-wallet-action function a real Paystack webhook / Transfers API call
+// would trigger in production.
+
+const ADD_MONEY_METHODS = [
+  { key: "transfer", label: "Bank Transfer", hint: "Add money via mobile or internet banking", Icon: Landmark },
+  { key: "topup", label: "Top-up with Card/Account", hint: "Add money directly from your bank card or account", Icon: CreditCard },
+  { key: "ussd", label: "Bank USSD", hint: "With other banks' USSD code", Icon: Smartphone },
+  { key: "qr", label: "Scan my QR Code", hint: "Show QR code to any Rota user", Icon: QrCode },
+];
+const POPULAR_BANKS_FOR_TRANSFER = ["OPay", "Zenith Bank", "United Bank for Africa", "Kuda"];
+
+function SimulateInboundForm({ defaultBank = "", defaultName = "", hideNameBank, submitLabel = "Simulate transfer received", onSubmit }) {
+  const [amount, setAmount] = useState("");
+  const [name, setName] = useState(defaultName);
+  const [bank, setBank] = useState(defaultBank);
+  const [submitting, setSubmitting] = useState(false);
+  const canSave = Number(amount) > 0;
+
+  async function submit() {
+    if (!canSave || submitting) return;
+    setSubmitting(true);
+    await onSubmit({ amount: Number(amount), name: name.trim() || "Bank transfer", bank: bank.trim() });
+    setSubmitting(false);
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+          Amount (₦)
+        </label>
+        <input
+          type="number"
+          autoFocus
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          className="w-full rounded-xl px-3 py-2.5 text-sm"
+          style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+        />
+      </div>
+      {!hideNameBank && (
+        <>
+          <div>
+            <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+              Sender name
+            </label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. John Doe"
+              className="w-full rounded-xl px-3 py-2.5 text-sm"
+              style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+            />
+          </div>
+          <div>
+            <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+              Sending bank
+            </label>
+            <input
+              value={bank}
+              onChange={(e) => setBank(e.target.value)}
+              placeholder="e.g. GTBank"
+              className="w-full rounded-xl px-3 py-2.5 text-sm"
+              style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+            />
+          </div>
+        </>
+      )}
+      <button
+        disabled={!canSave || submitting}
+        onClick={submit}
+        className="w-full rounded-2xl py-3 font-semibold text-sm mt-1 flex items-center justify-center gap-2 transition-transform active:scale-95"
+        style={{ background: canSave ? T.gold : T.ink3, color: canSave ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
+      >
+        {submitting && <Loader2 size={14} className="animate-spin" />}
+        {submitLabel}
+      </button>
+    </div>
+  );
+}
+
+function AddMoneySheet({ wallet, onClose, onCredited }) {
+  const [method, setMethod] = useState(null); // null = method list
+  const [copied, setCopied] = useState(false);
+  const [prefillBank, setPrefillBank] = useState("");
+  const kbInset = useKeyboardInset();
+
+  function copyAccountNumber() {
+    navigator.clipboard?.writeText(wallet.virtual_account_number).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  const formatted = wallet.virtual_account_number.replace(/(\d{3})(\d{3})(\d{4})/, "$1 $2 $3");
+  const active = ADD_MONEY_METHODS.find((m) => m.key === method);
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20, paddingBottom: kbInset }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "88vh" }}>
+        <div className="flex items-center gap-2 mb-4">
+          {method && (
+            <button onClick={() => setMethod(null)} className="flex-shrink-0">
+              <ChevronDown size={18} color={T.muted} style={{ transform: "rotate(90deg)" }} />
+            </button>
+          )}
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
+            {active ? active.label : "Add Money"}
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+
+        {!method && (
+          <div className="flex flex-col">
+            {ADD_MONEY_METHODS.map((m) => (
+              <button
+                key={m.key}
+                onClick={() => setMethod(m.key)}
+                className="flex items-center gap-3 py-3.5 text-left"
+                style={{ borderBottom: `1px solid ${T.ink3}` }}
+              >
+                <div className="rounded-xl flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, background: T.ink }}>
+                  <m.Icon size={18} color={T.paper} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">
+                    {m.label}
+                  </p>
+                  <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                    {m.hint}
+                  </p>
+                </div>
+                <ChevronDown size={16} color={T.muted} style={{ transform: "rotate(-90deg)", flexShrink: 0 }} />
+              </button>
+            ))}
+          </div>
+        )}
+
+        {method === "transfer" && (
+          <div className="flex flex-col gap-4">
+            <div>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-1">
+                {wallet.virtual_account_bank_name}
+              </p>
+              <span style={{ fontFamily: FONT_MONO, color: T.paper, letterSpacing: 1 }} className="text-2xl font-semibold block mb-3">
+                {formatted}
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={copyAccountNumber}
+                  className="flex-1 rounded-full py-2.5 text-sm font-semibold flex items-center justify-center gap-2"
+                  style={{ background: `${T.ok}22`, color: T.ok, fontFamily: FONT_BODY }}
+                >
+                  <Copy size={14} /> {copied ? "Copied" : "Copy Number"}
+                </button>
+                <button
+                  onClick={copyAccountNumber}
+                  className="flex-1 rounded-full py-2.5 text-sm font-semibold"
+                  style={{ background: T.ok, color: "#fff", fontFamily: FONT_BODY }}
+                >
+                  Share Details
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl p-3" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-2">
+                Tap a bank to prefill it below
+              </p>
+              <div className="flex gap-3">
+                {POPULAR_BANKS_FOR_TRANSFER.map((b) => (
+                  <button
+                    key={b}
+                    onClick={() => {
+                      setPrefillBank(b);
+                      copyAccountNumber();
+                    }}
+                  >
+                    <BankMonogram name={b} size={36} />
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <SimulateInboundForm key={prefillBank} defaultBank={prefillBank} onSubmit={onCredited} />
+          </div>
+        )}
+
+        {method === "topup" && (
+          <div className="flex flex-col gap-4">
+            <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              Add money instantly from a debit card or linked account.
+            </p>
+            <SimulateInboundForm hideNameBank defaultName="Card top-up" submitLabel="Pay" onSubmit={onCredited} />
+          </div>
+        )}
+
+        {method === "ussd" && (
+          <div className="flex flex-col gap-4">
+            <div className="rounded-2xl p-4 text-center" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <p style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-base font-semibold mb-1">
+                *901*Amount*{wallet.virtual_account_number}#
+              </p>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                Dial this from any phone on any network to fund this account.
+              </p>
+            </div>
+            <SimulateInboundForm hideNameBank defaultName="USSD transfer" submitLabel="Simulate USSD transfer" onSubmit={onCredited} />
+          </div>
+        )}
+
+        {method === "qr" && (
+          <div className="flex flex-col gap-4">
+            <div className="rounded-2xl p-6 flex flex-col items-center gap-3" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <div
+                className="rounded-xl flex items-center justify-center"
+                style={{ width: 140, height: 140, background: T.ink2, border: `1px solid ${T.ink3}` }}
+              >
+                <QrCode size={72} color={T.paper} />
+              </div>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs text-center">
+                Show this to any Rota user to receive a transfer straight into this account.
+              </p>
+            </div>
+            <SimulateInboundForm hideNameBank defaultName="QR payment" submitLabel="Simulate QR payment" onSubmit={onCredited} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SendMoneySheet({ wallet, hasPin, hasBiometric, onClose, onSent }) {
+  const [step, setStep] = useState("recipient"); // recipient | amount | review
+  const [confirming, setConfirming] = useState(false);
+  const kbInset = useKeyboardInset();
+  const [accountNumber, setAccountNumber] = useState("");
+  const [bankCode, setBankCode] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [banks, setBanks] = useState(cachedBanks || []);
+  const [banksLoading, setBanksLoading] = useState(!cachedBanks);
+  const [resolvedName, setResolvedName] = useState("");
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState("");
+  const [detecting, setDetecting] = useState(false);
+  const [detectMatches, setDetectMatches] = useState([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const autoDetectedKeyRef = useRef("");
+
+  const [amount, setAmount] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [sendError, setSendError] = useState("");
+
+  useEffect(() => {
+    if (cachedBanks) return;
+    let alive = true;
+    supabase.functions.invoke("list-banks", { body: {} }).then(({ data, error }) => {
+      if (!alive) return;
+      if (!error && data?.banks) {
+        cachedBanks = data.banks;
+        setBanks(data.banks);
+      }
+      setBanksLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Same account-number → bank auto-detect pattern used when scheduling a
+  // Rota: verify against the chosen bank if one's picked, otherwise try to
+  // auto-detect it (like OPay/PalmPay do) from the number alone.
+  useEffect(() => {
+    setResolveError("");
+    setDetectMatches([]);
+    if (accountNumber.length !== 10) {
+      setResolvedName("");
+      return;
+    }
+    if (bankCode) {
+      const key = `${accountNumber}:${bankCode}`;
+      if (autoDetectedKeyRef.current === key) return;
+      setResolvedName("");
+      setResolving(true);
+      const handle = setTimeout(async () => {
+        const { data, error } = await supabase.functions.invoke("resolve-account", {
+          body: { account_number: accountNumber, bank_code: bankCode },
+        });
+        if (error || !data?.account_name) {
+          setResolveError((data && data.error) || "Couldn't verify that account.");
+        } else {
+          setResolvedName(data.account_name);
+        }
+        setResolving(false);
+      }, 500);
+      return () => clearTimeout(handle);
+    }
+    setResolvedName("");
+    setDetecting(true);
+    supabase.functions.invoke("detect-bank", { body: { account_number: accountNumber } }).then(({ data, error }) => {
+      setDetecting(false);
+      if (error || !data?.matches || data.matches.length === 0) return;
+      if (data.matches.length === 1) {
+        const m = data.matches[0];
+        autoDetectedKeyRef.current = `${accountNumber}:${m.bank_code}`;
+        setBankCode(m.bank_code);
+        setBankName(m.bank_name);
+        setResolvedName(m.account_name);
+      } else {
+        setDetectMatches(data.matches);
+      }
+    });
+  }, [accountNumber, bankCode]);
+
+  function pickDetectedMatch(m) {
+    autoDetectedKeyRef.current = `${accountNumber}:${m.bank_code}`;
+    setBankCode(m.bank_code);
+    setBankName(m.bank_name);
+    setResolvedName(m.account_name);
+    setDetectMatches([]);
+  }
+  function pickBank(b) {
+    autoDetectedKeyRef.current = "";
+    setBankCode(b.code);
+    setBankName(b.name);
+    setPickerOpen(false);
+  }
+
+  const canGoNext = accountNumber.length === 10 && bankCode;
+  const breakdown = transferCharge(Number(amount) || 0);
+  const insufficient = breakdown.total > Number(wallet.balance || 0);
+
+  async function submitSend() {
+    if (!(Number(amount) > 0) || submitting) return;
+    setSubmitting(true);
+    setSendError("");
+    const { data, error } = await supabase.functions.invoke("dva-wallet-action", {
+      body: {
+        wallet_id: wallet.id,
+        action: "debit",
+        amount: breakdown.total,
+        counterparty_name: resolvedName || "Recipient",
+        counterparty_bank: bankName,
+      },
+    });
+    setSubmitting(false);
+    if (error || data?.error) {
+      setSendError((data && data.error) || "Couldn't complete transfer.");
+      return;
+    }
+    onSent(data.balance);
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20, paddingBottom: kbInset }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "88vh" }}>
+        <div className="flex items-center gap-2 mb-4">
+          {step !== "recipient" && (
+            <button onClick={() => setStep(step === "review" ? "amount" : "recipient")} className="flex-shrink-0">
+              <ChevronDown size={18} color={T.muted} style={{ transform: "rotate(90deg)" }} />
+            </button>
+          )}
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
+            {step === "recipient" ? "Transfer to Bank Account" : step === "amount" ? "Send Money" : "Confirm transfer"}
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+
+        {step === "recipient" && (
+          <div className="flex flex-col gap-3">
+            <div>
+              <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+                Recipient Account
+              </label>
+              <input
+                value={accountNumber}
+                onChange={(e) => {
+                  setAccountNumber(e.target.value.replace(/\D/g, "").slice(0, 10));
+                  setBankCode("");
+                  setBankName("");
+                  setResolvedName("");
+                  autoDetectedKeyRef.current = "";
+                }}
+                placeholder="Enter 10 digits Account Number"
+                inputMode="numeric"
+                className="w-full rounded-xl px-3 py-2.5 text-sm"
+                style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+              />
+            </div>
+
+            {detecting && (
+              <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                <Loader2 size={12} className="animate-spin" /> Verifying which account this is...
+              </p>
+            )}
+
+            {detectMatches.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                  {detectMatches.length === 1 ? "We think this is:" : "Found more than one match — which is it?"}
+                </p>
+                {detectMatches.map((m) => (
+                  <button
+                    key={m.bank_code}
+                    onClick={() => pickDetectedMatch(m)}
+                    className="text-left rounded-xl px-3 py-2 text-xs flex items-center gap-2"
+                    style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+                  >
+                    <BankMonogram name={m.bank_name} size={20} />
+                    {m.bank_name} — {m.account_name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div>
+              <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+                Select Bank
+              </label>
+              <button
+                onClick={() => setPickerOpen(true)}
+                disabled={banksLoading}
+                className="w-full rounded-xl px-3 py-2.5 text-sm flex items-center justify-between"
+                style={{ background: T.ink, border: `1px solid ${T.ink3}`, fontFamily: FONT_BODY }}
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  {bankName && <BankMonogram name={bankName} />}
+                  <span className="truncate" style={{ color: bankName ? T.paper : T.muted }}>
+                    {bankName || (banksLoading ? "Loading banks..." : "Select Bank")}
+                  </span>
+                </span>
+                <ChevronDown size={14} color={T.muted} style={{ flexShrink: 0 }} />
+              </button>
+            </div>
+
+            {resolving && (
+              <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                <Loader2 size={12} className="animate-spin" /> Verifying account...
+              </p>
+            )}
+            {resolvedName && (
+              <p className="text-xs flex items-center gap-1.5" style={{ color: T.ok, fontFamily: FONT_BODY }}>
+                <Check size={12} /> {resolvedName}
+              </p>
+            )}
+            {resolveError && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                {resolveError}
+              </p>
+            )}
+
+            <button
+              disabled={!canGoNext}
+              onClick={() => setStep("amount")}
+              className="w-full rounded-full py-3 font-semibold text-sm mt-2 transition-transform active:scale-95"
+              style={{ background: canGoNext ? T.ok : T.ink3, color: canGoNext ? "#fff" : T.muted, fontFamily: FONT_BODY }}
+            >
+              Next
+            </button>
+          </div>
+        )}
+
+        {step === "amount" && (
+          <div className="flex flex-col gap-3">
+            <div className="rounded-2xl p-3 flex items-center gap-3" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <BankMonogram name={bankName} size={32} />
+              <div className="min-w-0">
+                <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-medium truncate">
+                  {resolvedName || "Recipient"}
+                </p>
+                <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                  {accountNumber} · {bankName}
+                </p>
+              </div>
+            </div>
+            <div>
+              <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+                Amount (₦)
+              </label>
+              <input
+                type="number"
+                autoFocus
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                className="w-full rounded-xl px-3 py-2.5 text-sm"
+                style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+              />
+            </div>
+            <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              Available balance: {naira(wallet.balance)}
+            </p>
+            <button
+              disabled={!(Number(amount) > 0)}
+              onClick={() => setStep("review")}
+              className="w-full rounded-full py-3 font-semibold text-sm mt-1 transition-transform active:scale-95"
+              style={{
+                background: Number(amount) > 0 ? T.ok : T.ink3,
+                color: Number(amount) > 0 ? "#fff" : T.muted,
+                fontFamily: FONT_BODY,
+              }}
+            >
+              Continue
+            </button>
+          </div>
+        )}
+
+        {step === "review" && (
+          <div className="flex flex-col gap-4">
+            <div className="text-center">
+              <div style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-3xl font-semibold">
+                {nairaExact(breakdown.total)}
+              </div>
+            </div>
+
+            <div className="rounded-2xl p-4 flex flex-col gap-3" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <div className="flex items-center justify-between gap-3">
+                <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                  Bank
+                </span>
+                <span className="flex items-center gap-2 min-w-0">
+                  <BankMonogram name={bankName} size={20} />
+                  <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm truncate">
+                    {bankName}
+                  </span>
+                </span>
+              </div>
+              <ReceiptRow label="Account Number" value={accountNumber} mono />
+              <ReceiptRow label="Name" value={resolvedName || "Recipient"} />
+              <ReceiptRow label="Amount" value={nairaExact(Number(amount))} mono />
+              <ReceiptRow label="Fee" value={nairaExact(breakdown.fee)} mono />
+              <ReceiptRow label="VAT" value={nairaExact(breakdown.vat)} mono />
+              <div className="pt-3 flex items-center justify-between" style={{ borderTop: `1px solid ${T.ink3}` }}>
+                <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">
+                  Total
+                </span>
+                <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-sm font-semibold">
+                  {nairaExact(breakdown.total)}
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-2xl p-3 flex items-center justify-between" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                Paying from wallet
+              </span>
+              <span style={{ fontFamily: FONT_MONO, color: insufficient ? T.warn : T.paper }} className="text-sm">
+                {naira(wallet.balance)}
+              </span>
+            </div>
+
+            {insufficient && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                Insufficient balance — you need {nairaExact(breakdown.total - Number(wallet.balance || 0))} more.
+              </p>
+            )}
+            {!hasPin && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                Set a transaction PIN in Profile → Settings before sending money.
+              </p>
+            )}
+            {sendError && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                {sendError}
+              </p>
+            )}
+
+            <button
+              disabled={submitting || insufficient || !hasPin}
+              onClick={() => setConfirming(true)}
+              className="w-full rounded-full py-3.5 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95"
+              style={{
+                background: !submitting && !insufficient && hasPin ? T.ok : T.ink3,
+                color: !submitting && !insufficient && hasPin ? "#fff" : T.muted,
+                fontFamily: FONT_BODY,
+              }}
+            >
+              {submitting && <Loader2 size={14} className="animate-spin" />}
+              Pay
+            </button>
+          </div>
+        )}
+      </div>
+      {pickerOpen && (
+        <BankPicker banks={banks} banksLoading={banksLoading} value={bankCode} onSelect={pickBank} onClose={() => setPickerOpen(false)} />
+      )}
+      {confirming && (
+        <ConfirmSheet
+          title="Confirm transfer"
+          actionLabel="Pay with PIN"
+          hasBiometric={hasBiometric}
+          onClose={() => setConfirming(false)}
+          onConfirmed={() => {
+            setConfirming(false);
+            submitSend();
+          }}
+        />
+      )}
+    </div>
   );
 }
 
 /* ---------- Welcome ---------- */
 function WelcomeScreen({ onNext }) {
   return (
-    <div className="h-full flex flex-col justify-between px-7 py-10" style={{ background: T.ink }}>
+    <div className="h-full flex flex-col justify-between px-7" style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}>
       <div>
         <div className="flex items-center gap-2">
           <div
@@ -285,7 +1044,7 @@ function LinkScreen({ email, onLinked, onSkip }) {
   }
 
   return (
-    <div className="h-full flex flex-col px-6 py-8" style={{ background: T.ink }}>
+    <div className="h-full flex flex-col px-6" style={{ background: T.ink, paddingTop: "max(32px, env(safe-area-inset-top))", paddingBottom: "max(32px, env(safe-area-inset-bottom))" }}>
       <h1 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold mb-1">
         Link your card
       </h1>
@@ -346,8 +1105,14 @@ function LinkScreen({ email, onLinked, onSkip }) {
 
 /* ---------- Home tab ---------- */
 function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
-  const [balanceSheetOpen, setBalanceSheetOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [wallet, setWallet] = useState(null);
+  const [walletLoading, setWalletLoading] = useState(true);
+  const [walletTxns, setWalletTxns] = useState([]);
+  const [addMoneyOpen, setAddMoneyOpen] = useState(false);
+  const [sendMoneyOpen, setSendMoneyOpen] = useState(false);
+  const [walletHistoryOpen, setWalletHistoryOpen] = useState(false);
+
   const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
   const totalPaid = payments.filter((p) => p.status === "paid").reduce((s, p) => s + p.amount, 0);
   const pct = totalBudgeted ? Math.min(100, Math.round((totalPaid / totalBudgeted) * 100)) : 0;
@@ -360,11 +1125,43 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
     .sort((a, b) => b.date.localeCompare(a.date))
     .slice(0, 3);
 
-  const remaining = settings.totalBalance - totalBudgeted;
-  const overBudget = remaining < 0;
-
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+
+  // Wallet balance/activity now live here on Home rather than a separate
+  // tab — dva-get-or-create-wallet attempts the real Paystack DVA call
+  // first and only falls back to a labeled preview account because the
+  // business isn't registered yet.
+  const loadWalletTxns = useCallback(async (walletId) => {
+    const { data } = await supabase
+      .from("dva_wallet_transactions")
+      .select("*")
+      .eq("wallet_id", walletId)
+      .order("created_at", { ascending: false })
+      .limit(100);
+    setWalletTxns(data || []);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const { data, error } = await supabase.functions.invoke("dva-get-or-create-wallet", { body: {} });
+      if (!alive) return;
+      if (!error && data?.wallet) {
+        setWallet(data.wallet);
+        loadWalletTxns(data.wallet.id);
+      }
+      setWalletLoading(false);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [loadWalletTxns]);
+
+  function refreshWalletBalance(newBalance) {
+    setWallet((prev) => (prev ? { ...prev, balance: newBalance } : prev));
+    if (wallet) loadWalletTxns(wallet.id);
+  }
 
   return (
     <div className="px-5 pb-4 flex flex-col gap-4">
@@ -385,35 +1182,121 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
         </button>
       )}
 
-      <div className="rounded-2xl p-4" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-        <div className="flex justify-between items-center mb-1">
+      <div className="rounded-2xl p-4 flex items-center justify-between gap-3" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="min-w-0">
           <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-            Total balance
+            Balance
           </span>
-          <button onClick={() => setBalanceSheetOpen(true)}>
-            <Pencil size={12} color={T.muted} />
-          </button>
+          {walletLoading ? (
+            <div className="py-1.5">
+              <Loader2 size={18} className="animate-spin" color={T.muted} />
+            </div>
+          ) : (
+            <div style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-2xl font-semibold">
+              {naira(wallet?.balance || 0)}
+            </div>
+          )}
         </div>
-        <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-2xl font-semibold">
-          {naira(settings.totalBalance)}
-        </span>
-        <div className="mt-3 pt-3 flex items-center justify-between" style={{ borderTop: `1px solid ${T.ink3}` }}>
-          <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-            Scheduled budget
-          </span>
-          <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-xs">
-            {naira(totalBudgeted)}
-          </span>
-        </div>
-        <span
-          className="text-xs"
-          style={{ fontFamily: FONT_BODY, color: overBudget ? T.warn : T.ok }}
+        <button
+          onClick={() => setWalletHistoryOpen(true)}
+          disabled={!wallet}
+          className="flex flex-col items-center gap-1 flex-shrink-0 rounded-xl px-3 py-2 transition-transform active:scale-95"
+          style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
         >
-          {overBudget
-            ? `Over by ${naira(Math.abs(remaining))} \u2014 some Rotas may fail if funds aren't available`
-            : `${naira(remaining)} left uncommitted`}
-        </span>
+          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs font-medium">
+            History
+          </span>
+          <ArrowLeftRight size={15} color={T.gold} />
+        </button>
       </div>
+
+      <div className="flex gap-3">
+        <button
+          onClick={() => setAddMoneyOpen(true)}
+          disabled={!wallet}
+          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2.5 transition-transform active:scale-95"
+          style={{ background: T.gold }}
+        >
+          <span
+            className="rounded-full flex items-center justify-center flex-shrink-0"
+            style={{ width: 24, height: 24, background: "rgba(0,0,0,0.14)" }}
+          >
+            <ArrowDownLeft size={14} color={T.ink2} strokeWidth={2.6} />
+          </span>
+          <span style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-sm font-semibold">
+            Add Money
+          </span>
+        </button>
+        <button
+          onClick={() => setSendMoneyOpen(true)}
+          disabled={!wallet}
+          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2.5 transition-transform active:scale-95"
+          style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
+        >
+          <span
+            className="rounded-full flex items-center justify-center flex-shrink-0"
+            style={{ width: 24, height: 24, background: T.ink3 }}
+          >
+            <ArrowUpRight size={14} color={T.paper} strokeWidth={2.6} />
+          </span>
+          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">
+            Send Money
+          </span>
+        </button>
+      </div>
+
+      {walletTxns.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              Wallet activity
+            </p>
+            {walletTxns.length > 2 && (
+              <button
+                onClick={() => setWalletHistoryOpen(true)}
+                className="text-xs font-medium"
+                style={{ color: T.gold, fontFamily: FONT_BODY }}
+              >
+                See all
+              </button>
+            )}
+          </div>
+          <div className="flex flex-col gap-2">
+            {walletTxns.slice(0, 2).map((t) => (
+              <div key={t.id} className="rounded-xl p-3 flex items-center justify-between" style={{ background: T.ink2 }}>
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div
+                    className="rounded-full flex items-center justify-center flex-shrink-0"
+                    style={{ width: 22, height: 22, background: t.type === "credit" ? T.ok : T.ink3 }}
+                  >
+                    {t.type === "credit" ? <Check size={12} color={T.ink} /> : <Clock size={12} color={T.muted} />}
+                  </div>
+                  <div className="min-w-0">
+                    <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm truncate">
+                      {t.description ||
+                        (t.type === "credit"
+                          ? `From ${t.counterparty_name || "bank transfer"}`
+                          : `To ${t.counterparty_name || "recipient"}`)}
+                    </p>
+                    {t.counterparty_bank && (
+                      <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                        {t.counterparty_bank}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <span
+                  style={{ fontFamily: FONT_MONO, color: t.type === "credit" ? T.ok : T.paper }}
+                  className="text-sm flex-shrink-0"
+                >
+                  {t.type === "credit" ? "+" : "-"}
+                  {naira(t.amount)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="rounded-2xl p-4" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex justify-between items-baseline mb-3">
@@ -512,22 +1395,145 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
         </div>
       </div>
 
-      {balanceSheetOpen && (
-        <BalanceSheet
-          current={settings.totalBalance}
-          onClose={() => setBalanceSheetOpen(false)}
-          onSave={(v) => {
-            onUpdate({ totalBalance: v });
-            setBalanceSheetOpen(false);
+      {historyOpen && (
+        <TransactionHistorySheet payments={payments} senderName={settings.name} onClose={() => setHistoryOpen(false)} />
+      )}
+      {addMoneyOpen && wallet && (
+        <AddMoneySheet
+          wallet={wallet}
+          onClose={() => setAddMoneyOpen(false)}
+          onCredited={async ({ amount, name, bank }) => {
+            const { data } = await supabase.functions.invoke("dva-wallet-action", {
+              body: { wallet_id: wallet.id, action: "credit", amount, counterparty_name: name, counterparty_bank: bank },
+            });
+            if (data?.balance !== undefined) refreshWalletBalance(data.balance);
+            setAddMoneyOpen(false);
           }}
         />
       )}
-      {historyOpen && (
-        <TransactionHistorySheet payments={payments} senderName={settings.name} onClose={() => setHistoryOpen(false)} />
+      {sendMoneyOpen && wallet && (
+        <SendMoneySheet
+          wallet={wallet}
+          hasPin={settings.hasPin}
+          hasBiometric={settings.biometricRegistered}
+          onClose={() => setSendMoneyOpen(false)}
+          onSent={(newBalance) => {
+            refreshWalletBalance(newBalance);
+            setSendMoneyOpen(false);
+          }}
+        />
+      )}
+      {walletHistoryOpen && (
+        <WalletHistorySheet transactions={walletTxns} onClose={() => setWalletHistoryOpen(false)} />
       )}
     </div>
   );
 }
+
+// Money in and money out, grouped by day — so "what did I do today" is the
+// first thing visible, with older days below rather than in a separate view.
+function WalletHistorySheet({ transactions, onClose }) {
+  const groups = [];
+  for (const t of transactions) {
+    const day = (t.created_at || "").slice(0, 10);
+    const existing = groups.find((g) => g.day === day);
+    if (existing) existing.items.push(t);
+    else groups.push({ day, items: [t] });
+  }
+
+  function dayLabel(day) {
+    if (!day) return "Earlier";
+    if (day === todayISO()) return "Today";
+    if (day === isoOffset(-1)) return "Yesterday";
+    return new Date(day + "T00:00:00").toLocaleDateString("en-NG", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    });
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 23 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "85vh" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            Transaction history
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+
+        {transactions.length === 0 ? (
+          <p className="text-sm text-center py-10" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+            Nothing here yet. Money you send or receive will show up here.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {groups.map((g) => {
+              const inflow = g.items.filter((t) => t.type === "credit").reduce((s, t) => s + Number(t.amount || 0), 0);
+              const outflow = g.items.filter((t) => t.type === "debit").reduce((s, t) => s + Number(t.amount || 0), 0);
+              return (
+                <div key={g.day || "unknown"}>
+                  <div className="flex items-center justify-between mb-2">
+                    <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs font-semibold">
+                      {dayLabel(g.day)}
+                    </p>
+                    <p className="text-xs" style={{ fontFamily: FONT_MONO, color: T.muted }}>
+                      {inflow > 0 && <span style={{ color: T.ok }}>+{naira(inflow)}</span>}
+                      {inflow > 0 && outflow > 0 && " · "}
+                      {outflow > 0 && <span>-{naira(outflow)}</span>}
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    {g.items.map((t) => (
+                      <div key={t.id} className="rounded-xl p-3 flex items-center justify-between" style={{ background: T.ink }}>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div
+                            className="rounded-full flex items-center justify-center flex-shrink-0"
+                            style={{ width: 26, height: 26, background: t.type === "credit" ? T.ok : T.ink3 }}
+                          >
+                            {t.type === "credit" ? (
+                              <ArrowDownLeft size={13} color={T.ink} />
+                            ) : (
+                              <ArrowUpRight size={13} color={T.muted} />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm truncate">
+                              {t.description ||
+                                (t.type === "credit"
+                                  ? `From ${t.counterparty_name || "bank transfer"}`
+                                  : `To ${t.counterparty_name || "recipient"}`)}
+                            </p>
+                            <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                              {[t.counterparty_bank, t.created_at ? new Date(t.created_at).toLocaleTimeString("en-NG", { hour: "numeric", minute: "2-digit" }) : null]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </p>
+                          </div>
+                        </div>
+                        <span
+                          style={{ fontFamily: FONT_MONO, color: t.type === "credit" ? T.ok : T.paper }}
+                          className="text-sm flex-shrink-0"
+                        >
+                          {t.type === "credit" ? "+" : "-"}
+                          {naira(t.amount)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function TransactionHistorySheet({ payments, senderName, onClose }) {
   const [receiptFor, setReceiptFor] = useState(null);
@@ -536,7 +1542,7 @@ function TransactionHistorySheet({ payments, senderName, onClose }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 21 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5 overflow-y-auto" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "80vh" }}>
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "80vh" }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Transaction History
@@ -581,53 +1587,6 @@ function TransactionHistorySheet({ payments, senderName, onClose }) {
         )}
       </div>
       {receiptFor && <ReceiptSheet payment={receiptFor} senderName={senderName} onClose={() => setReceiptFor(null)} />}
-    </div>
-  );
-}
-
-function BalanceSheet({ current, onClose, onSave }) {
-  const [value, setValue] = useState(String(current || ""));
-  const canSave = Number(value) >= 0 && value !== "";
-
-  return (
-    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 22 }}>
-      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
-            Set total balance
-          </h3>
-          <button onClick={onClose}>
-            <X size={18} color={T.muted} />
-          </button>
-        </div>
-        <p className="text-xs mb-3" style={{ color: T.muted, fontFamily: FONT_BODY }}>
-          This is what you tell Rota you have available — it's used to compare against your scheduled Rotas, not
-          a real account balance Rota holds.
-        </p>
-        <div>
-          <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
-            Amount (₦)
-          </label>
-          <input
-            type="number"
-            autoFocus
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && canSave && onSave(Number(value))}
-            className="w-full rounded-xl px-3 py-2.5 text-sm"
-            style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
-          />
-        </div>
-        <button
-          disabled={!canSave}
-          onClick={() => onSave(Number(value))}
-          className="w-full rounded-2xl py-3 font-semibold text-sm mt-3 transition-transform active:scale-95"
-          style={{ background: canSave ? T.gold : T.ink3, color: canSave ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
-        >
-          Save
-        </button>
-      </div>
     </div>
   );
 }
@@ -821,7 +1780,7 @@ function ScheduleDetailSheet({ payment, onClose, onSave }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 22 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5 overflow-y-auto" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "70vh" }}>
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "70vh" }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             {editing ? "Edit Rota" : "Rota details"}
@@ -1144,7 +2103,7 @@ function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, totalBalance, 
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5 overflow-y-auto" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "85vh" }}>
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "85vh" }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Add payment
@@ -1393,7 +2352,7 @@ function BankPicker({ banks, banksLoading, value, onSelect, onClose }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 30 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5 flex flex-col" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "75vh" }}>
+      <div className="relative rounded-t-3xl p-5 flex flex-col max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "75vh" }}>
         <div className="flex items-center justify-between mb-3">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Select bank
@@ -1589,7 +2548,7 @@ function ReceiptSheet({ payment, senderName, onClose }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 25 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Receipt
@@ -1754,7 +2713,7 @@ function AddTodoSheet({ onClose, onSave }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Add to-do
@@ -1880,7 +2839,7 @@ function AdvisorTab() {
 }
 
 /* ---------- Profile tab ---------- */
-function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadAvatar, onBiometricChange }) {
+function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadAvatar, onBiometricChange, email, onCardLinked }) {
   const [editingName, setEditingName] = useState(false);
   const [name, setName] = useState(settings.name);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
@@ -1888,6 +2847,7 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
   const [pwSheetOpen, setPwSheetOpen] = useState(false);
   const [pinSheetOpen, setPinSheetOpen] = useState(false);
   const [cardSheetOpen, setCardSheetOpen] = useState(false);
+  const [linkOverlayOpen, setLinkOverlayOpen] = useState(false);
   const [bioBusy, setBioBusy] = useState(false);
   const [bioError, setBioError] = useState("");
   const fileInputRef = useRef(null);
@@ -2028,11 +2988,14 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
           </p>
         )}
         <div className="flex items-center justify-between gap-2">
-          <button onClick={() => settings.cardLinked && setCardSheetOpen(true)} className="flex items-center gap-1.5">
+          <button
+            onClick={() => (settings.cardLinked ? setCardSheetOpen(true) : setLinkOverlayOpen(true))}
+            className="flex items-center gap-1.5"
+          >
             <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-              {settings.cardLinked ? `Debit card •••• ${settings.cardLast4}` : "No card linked"}
+              {settings.cardLinked ? `Debit card •••• ${settings.cardLast4}` : "No card linked — tap to add"}
             </p>
-            {settings.cardLinked && <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />}
+            <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
           </button>
           {!editingName && (
             <button
@@ -2049,6 +3012,9 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
       <div className="rounded-2xl overflow-hidden" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <Row icon={Bell} label="Notifications">
           <Toggle value={settings.notifications} onChange={(v) => onUpdate({ notifications: v })} />
+        </Row>
+        <Row icon={Moon} label="Dark mode">
+          <Toggle value={settings.darkMode} onChange={(v) => onUpdate({ darkMode: v })} />
         </Row>
         <button onClick={() => setPwSheetOpen(true)} className="w-full text-left">
           <Row icon={Lock} label="Change password">
@@ -2123,6 +3089,27 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
           }}
         />
       )}
+      {linkOverlayOpen && (
+        <div className="absolute inset-0 flex justify-center" style={{ zIndex: 26, background: T.ink }}>
+          <div className="relative w-full max-w-lg h-full">
+            <button
+              onClick={() => setLinkOverlayOpen(false)}
+              className="absolute rounded-full flex items-center justify-center"
+              style={{ top: 18, right: 18, width: 30, height: 30, background: T.ink2, border: `1px solid ${T.ink3}`, zIndex: 27 }}
+            >
+              <X size={16} color={T.muted} />
+            </button>
+            <LinkScreen
+              email={email}
+              onLinked={(last4) => {
+                onCardLinked(last4);
+                setLinkOverlayOpen(false);
+              }}
+              onSkip={() => setLinkOverlayOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2133,7 +3120,7 @@ function CardDetailSheet({ last4, hasPin, hasBiometric, onClose, onChangeCard })
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 22 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Card details
@@ -2251,7 +3238,7 @@ function PinSheet({ hasPin, onClose, onDone }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 22 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             {hasPin ? "Change transaction PIN" : "Set a transaction PIN"}
@@ -2293,10 +3280,11 @@ function PinSheet({ hasPin, onClose, onDone }) {
   );
 }
 
-function ConfirmSheet({ hasBiometric, onClose, onConfirmed }) {
+function ConfirmSheet({ hasBiometric, onClose, onConfirmed, title = "Confirm to schedule", actionLabel = "Confirm with PIN" }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const kbInset = useKeyboardInset();
 
   async function tryBiometric() {
     setError("");
@@ -2334,12 +3322,12 @@ function ConfirmSheet({ hasBiometric, onClose, onConfirmed }) {
   }
 
   return (
-    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 24 }}>
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 24, paddingBottom: kbInset }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
-            Confirm to schedule
+            {title}
           </h3>
           <button onClick={onClose}>
             <X size={18} color={T.muted} />
@@ -2372,7 +3360,7 @@ function ConfirmSheet({ hasBiometric, onClose, onConfirmed }) {
           }}
         >
           {submitting && <Loader2 size={14} className="animate-spin" />}
-          Confirm with PIN
+          {actionLabel}
         </button>
       </div>
     </div>
@@ -2409,7 +3397,7 @@ function PasswordChangeSheet({ onClose }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 22 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Change password
@@ -2526,7 +3514,7 @@ function AuthScreen() {
   }
 
   return (
-    <div className="h-full flex flex-col justify-center px-7 py-10" style={{ background: T.ink }}>
+    <div className="h-full flex flex-col justify-center px-7" style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}>
       <span style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold mb-1">
         {mode === "signup" ? "Create your account" : "Welcome back"}
       </span>
@@ -2611,7 +3599,7 @@ export default function RotaApp() {
     const [{ data: profileRow }, { data: paymentRows }, { data: todoRows }] = await Promise.all([
       supabase
         .from("profiles")
-        .select("id,name,notifications,biometric,card_linked,card_last4,avatar_url,has_pin,total_balance")
+        .select("id,name,notifications,biometric,card_linked,card_last4,avatar_url,has_pin,total_balance,dark_mode,card_link_skipped")
         .eq("id", authUser.id)
         .single(),
       supabase.from("payments").select("*").eq("user_id", authUser.id).order("date", { ascending: true }),
@@ -2621,7 +3609,10 @@ export default function RotaApp() {
     setSettings(profileRow ? mapProfile(profileRow) : defaultSettings());
     setPayments((paymentRows || []).map((p) => ({ ...p, amount: Number(p.amount) })));
     setTodos(todoRows || []);
-    setScreen(profileRow && profileRow.card_linked ? "app" : "link");
+    // Only force the card-link screen the very first time — if the user has
+    // already linked a card OR already skipped it once before, go straight
+    // in. They can still link a card later from Profile.
+    setScreen(profileRow && (profileRow.card_linked || profileRow.card_link_skipped) ? "app" : "link");
     setAuthLoading(false);
 
     supabase.functions.invoke("webauthn-status", { body: {} }).then(({ data }) => {
@@ -2852,7 +3843,13 @@ export default function RotaApp() {
     setScreen("app");
     setTab("home");
   }
+  function handleCardLinkedFromProfile(last4) {
+    // Same server-side effect as handleLinked (verify-card-link already
+    // updated the profiles row) — just sync local state, no navigation.
+    setSettings((prev) => ({ ...prev, cardLinked: true, cardLast4: last4 }));
+  }
   function handleSkipLink() {
+    updateSettings({ cardLinkSkipped: true });
     setScreen("app");
     setTab("home");
   }
@@ -2874,39 +3871,103 @@ export default function RotaApp() {
     setTodos([]);
   }
 
-  const bodyStyle = { background: T.ink, height: "100%", display: "flex", flexDirection: "column" };
+  // Mutates the shared T palette in place before rendering, so every
+  // component's T.xxx reads below pick up the right theme this pass.
+  applyTheme(settings.darkMode);
 
+  const globalStyles = `
+    @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+    html, body { overscroll-behavior-y: none; }
+    .rota-shell {
+      height: 100vh;
+      height: 100dvh;
+      overscroll-behavior: contain;
+    }
+    /* The logged-in shell is a fixed-height flex column pinned to the
+       viewport: the header and tab bar never scroll, only the tab content
+       between them does. Previously the outer wrapper was minHeight:100vh
+       and the page itself scrolled, carrying the bottom tab bar up off
+       the screen on mobile. */
+    .rota-viewport {
+      height: 100vh;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .rota-shell-app {
+      flex: 1;
+      min-height: 0;
+      overscroll-behavior: contain;
+    }
+    .rota-tabbar-safe {
+      padding-bottom: max(14px, env(safe-area-inset-bottom));
+    }
+    /* The bottom bar is fixed to the viewport, so it no longer takes up
+       flow space — reserve that space at the end of the scroll area
+       instead, or the last card sits underneath it. */
+    .rota-scroll-pad {
+      padding-bottom: calc(72px + max(14px, env(safe-area-inset-bottom)));
+    }
+    @media (min-width: 1024px) {
+      .rota-scroll-pad { padding-bottom: 0; }
+    }
+    .rota-header-safe {
+      padding-top: max(24px, env(safe-area-inset-top));
+    }
+  `;
+
+  const isAppScreen = !authLoading && screen === "app";
+
+  if (!isAppScreen) {
+    // Onboarding / auth screens stay a narrow, centered column at every
+    // width — this is a login-style flow, not a dashboard, so it shouldn't
+    // stretch edge-to-edge on a laptop any more than a normal sign-in page would.
+    const bodyStyle = { background: T.ink, height: "100%", display: "flex", flexDirection: "column" };
+    return (
+      <div className="w-full flex justify-center" style={{ background: T.ink3, minHeight: "100vh" }}>
+        <style>{globalStyles}</style>
+        <div
+          className="rota-shell w-full sm:max-w-lg relative overflow-hidden"
+          style={{ background: T.ink, borderLeft: `1px solid ${T.ink3}`, borderRight: `1px solid ${T.ink3}` }}
+        >
+          {authLoading ? (
+            <div className="h-full flex items-center justify-center" style={bodyStyle}>
+              <span style={{ fontFamily: FONT_DISPLAY, color: T.gold }} className="text-xl">
+                Rota
+              </span>
+            </div>
+          ) : screen === "welcome" ? (
+            <WelcomeScreen onNext={() => setScreen("auth")} />
+          ) : screen === "auth" ? (
+            <AuthScreen />
+          ) : (
+            <LinkScreen email={user?.email} onLinked={handleLinked} onSkip={handleSkipLink} />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // The logged-in app fills the full browser width. Below the lg breakpoint
+  // it's the familiar single-column mobile layout with a bottom tab bar;
+  // from lg up, a sidebar takes over navigation and the freed-up horizontal
+  // space goes to actual chrome (sidebar, full-width header) instead of
+  // empty margin — the content column itself stays at a readable width.
   return (
-    <div className="w-full flex justify-center" style={{ background: T.ink3, minHeight: "100vh" }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-        .rota-shell { height: 100vh; height: 100dvh; }
-      `}</style>
-      <div
-        className="rota-shell w-full sm:max-w-md relative overflow-hidden"
-        style={{ background: T.ink, borderLeft: `1px solid ${T.ink3}`, borderRight: `1px solid ${T.ink3}` }}
-      >
-        {authLoading ? (
-          <div className="h-full flex items-center justify-center" style={bodyStyle}>
-            <span style={{ fontFamily: FONT_DISPLAY, color: T.gold }} className="text-xl">
-              Rota
-            </span>
-          </div>
-        ) : screen === "welcome" ? (
-          <WelcomeScreen onNext={() => setScreen("auth")} />
-        ) : screen === "auth" ? (
-          <AuthScreen />
-        ) : screen === "link" ? (
-          <LinkScreen email={user?.email} onLinked={handleLinked} onSkip={handleSkipLink} />
-        ) : (
-          <div style={bodyStyle}>
-            <AppHeader
-              title={{ home: "Rota", schedule: "Schedule", todo: "To-Do", advisor: "Advisor", profile: "Profile" }[tab]}
-              onProfile={tab !== "profile" ? () => setTab("profile") : undefined}
-              avatarUrl={settings.avatarUrl}
-              name={settings.name}
-            />
-            <div className="flex-1 overflow-y-auto">
+    <div className="rota-viewport w-full" style={{ background: T.ink }}>
+      <style>{globalStyles}</style>
+      <div className="rota-shell-app w-full flex overflow-hidden">
+        <SideNav tab={tab} setTab={setTab} />
+        <div className="relative flex-1 flex flex-col min-w-0">
+          <AppHeader
+            title={{ home: "Rota", schedule: "Schedule", todo: "To-Do", advisor: "Advisor", profile: "Profile" }[tab]}
+            onProfile={tab !== "profile" ? () => setTab("profile") : undefined}
+            avatarUrl={settings.avatarUrl}
+            name={settings.name}
+          />
+          <div className="flex-1 overflow-y-auto rota-scroll-pad">
+            <div className="max-w-2xl mx-auto w-full">
               {tab === "home" && <HomeTab payments={payments} todos={todos} settings={settings} goTab={setTab} onUpdate={updateSettings} />}
               {tab === "schedule" && (
                 <ScheduleTab
@@ -2934,12 +3995,14 @@ export default function RotaApp() {
                   onUnlink={handleUnlink}
                   onUploadAvatar={uploadAvatar}
                   onBiometricChange={(v) => setSettings((prev) => ({ ...prev, biometricRegistered: v }))}
+                  email={user?.email}
+                  onCardLinked={handleCardLinkedFromProfile}
                 />
               )}
             </div>
-            <TabBar tab={tab} setTab={setTab} />
           </div>
-        )}
+          <TabBar tab={tab} setTab={setTab} />
+        </div>
       </div>
     </div>
   );
