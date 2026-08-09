@@ -37,13 +37,20 @@ Deno.serve(async (req) => {
     const paystackSecretKey = Deno.env.get("PAYSTACK_SECRET_KEY");
     const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
-    // Single shared demo wallet for this preview (no auth wall — reviewed
-    // via a private link) — reuse it if it already exists.
+    // Every wallet belongs to exactly one signed-in user — resolved from
+    // their own session token, never from a client-supplied id, so one
+    // account can never be handed another account's wallet.
+    const authHeader = req.headers.get("Authorization") || "";
+    const token = authHeader.replace(/^Bearer\s+/i, "");
+    if (!token) return json({ error: "Not signed in" }, 401);
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+    if (userErr || !userData?.user) return json({ error: "Not signed in" }, 401);
+    const userId = userData.user.id;
+
     const { data: existing } = await supabaseAdmin
       .from("dva_wallets")
       .select("*")
-      .order("created_at", { ascending: true })
-      .limit(1)
+      .eq("user_id", userId)
       .maybeSingle();
     if (existing) return json({ wallet: existing });
 
@@ -63,9 +70,9 @@ Deno.serve(async (req) => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            email: "preview-demo@rota.app",
+            email: userData.user.email || "preview-demo@rota.app",
             first_name: "Rota",
-            last_name: "Preview",
+            last_name: "User",
             phone: "+2348000000000",
             preferred_bank: "wema-bank",
             country: "NG",
@@ -94,6 +101,7 @@ Deno.serve(async (req) => {
     const { data: inserted, error } = await supabaseAdmin
       .from("dva_wallets")
       .insert({
+        user_id: userId,
         virtual_account_number: accountNumber,
         virtual_account_bank_name: bankName,
         virtual_account_bank_slug: bankSlug,

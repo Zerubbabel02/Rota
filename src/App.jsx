@@ -1596,6 +1596,7 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
   const [sheetOpen, setSheetOpen] = useState(false);
   const [receiptFor, setReceiptFor] = useState(null);
   const [detailFor, setDetailFor] = useState(null);
+  const [detailEditIntent, setDetailEditIntent] = useState(false);
   const sorted = [...payments].sort((a, b) => a.date.localeCompare(b.date));
   const today = todayISO();
 
@@ -1657,15 +1658,29 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
                     <div className="flex items-center gap-2 flex-wrap">
                       <CategoryChip category={p.category} />
                       <span
-                        className="text-[10px] px-1.5 py-0.5 rounded-full"
+                        className="text-[10px] font-semibold px-2 py-1 rounded-full"
                         style={{
                           fontFamily: FONT_BODY,
-                          color: isAutomatic ? T.blue : T.muted,
-                          background: isAutomatic ? `${T.blue}1A` : T.ink3,
+                          color: isAutomatic ? T.blue : T.gold,
+                          background: isAutomatic
+                            ? `linear-gradient(135deg, ${T.blue}40, ${T.blue}12)`
+                            : `linear-gradient(135deg, ${T.gold}40, ${T.gold}12)`,
+                          border: `1px solid ${isAutomatic ? T.blue : T.gold}50`,
+                          backdropFilter: "blur(6px)",
+                          WebkitBackdropFilter: "blur(6px)",
+                          boxShadow: "inset 0 1px 0 rgba(255,255,255,0.3), 0 1px 2px rgba(0,0,0,0.08)",
                         }}
                       >
                         {isAutomatic ? "Automatic Rota" : "Manual Rota"}
                       </span>
+                      {p.status === "upcoming" && (
+                        <span
+                          className="text-[10px] flex items-center gap-1"
+                          style={{ color: T.muted, fontFamily: FONT_BODY }}
+                        >
+                          <Clock size={9} /> {daysAway(p.date)}
+                        </span>
+                      )}
                     </div>
                     {p.recipient_account_name && (
                       <p className="text-xs mt-1" style={{ color: T.muted, fontFamily: FONT_BODY }}>
@@ -1718,9 +1733,18 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
                       Mark as paid
                     </button>
                   )}
-                  <button onClick={(e) => { e.stopPropagation(); onDelete(p.id); }}>
-                    <Trash2 size={14} color={T.muted} />
-                  </button>
+                  <div className="flex items-center gap-3">
+                    {p.status === "upcoming" && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setDetailEditIntent(true); setDetailFor(p); }}
+                      >
+                        <Pencil size={14} color={T.muted} />
+                      </button>
+                    )}
+                    <button onClick={(e) => { e.stopPropagation(); onDelete(p.id); }}>
+                      <Trash2 size={14} color={T.muted} />
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1742,10 +1766,15 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
       {detailFor && (
         <ScheduleDetailSheet
           payment={detailFor}
-          onClose={() => setDetailFor(null)}
+          startEditing={detailEditIntent}
+          onClose={() => {
+            setDetailFor(null);
+            setDetailEditIntent(false);
+          }}
           onSave={(updates) => {
             onEdit(detailFor.id, updates);
             setDetailFor(null);
+            setDetailEditIntent(false);
           }}
         />
       )}
@@ -1755,9 +1784,9 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
 
 let cachedBanks = null;
 
-function ScheduleDetailSheet({ payment, onClose, onSave }) {
+function ScheduleDetailSheet({ payment, onClose, onSave, startEditing = false }) {
   const canEdit = payment.status === "upcoming";
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(startEditing);
   const [name, setName] = useState(payment.name);
   const [amount, setAmount] = useState(String(payment.amount));
   const [date, setDate] = useState(payment.date);

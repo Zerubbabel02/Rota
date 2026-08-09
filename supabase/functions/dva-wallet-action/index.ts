@@ -32,10 +32,20 @@ Deno.serve(async (req) => {
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
+    // Confirm the caller actually owns wallet_id before touching it — this
+    // is a client-supplied id, so without this check anyone signed in could
+    // credit or debit any other user's wallet just by guessing/reusing an id.
+    const authHeader = req.headers.get("Authorization") || "";
+    const token = authHeader.replace(/^Bearer\s+/i, "");
+    if (!token) return json({ error: "Not signed in" }, 401);
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+    if (userErr || !userData?.user) return json({ error: "Not signed in" }, 401);
+
     const { data: wallet, error: fetchErr } = await supabaseAdmin
       .from("dva_wallets")
       .select("*")
       .eq("id", wallet_id)
+      .eq("user_id", userData.user.id)
       .single();
     if (fetchErr || !wallet) return json({ error: "Wallet not found" }, 404);
 
