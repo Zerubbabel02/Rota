@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient.js";
 import { startRegistration, startAuthentication, browserSupportsWebAuthn } from "@simplewebauthn/browser";
+import QRCode from "qrcode";
 import {
   Home as HomeIcon,
   Calendar,
@@ -34,6 +35,7 @@ import {
   QrCode,
   Copy,
   ArrowLeftRight,
+  Wifi,
 } from "lucide-react";
 
 /* ---------- Design tokens ---------- */
@@ -953,6 +955,204 @@ function SendMoneySheet({ wallet, hasPin, hasBiometric, onClose, onSent }) {
   );
 }
 
+/* ---------- Rota Tap ---------- */
+// The sender authorizes an amount with PIN/biometric up front (same
+// ConfirmSheet everything else uses), which opens a 10-minute claim window
+// on the server. Nothing moves until the other person accepts — via NFC tap
+// where Web NFC exists (Chrome/Android only) or by scanning the QR code
+// everywhere else, including iPhone. Money debits from the sender only once
+// the receiver taps Accept, not at creation time.
+function TapSendSheet({ wallet, hasPin, hasBiometric, onClose, onClaimed }) {
+  const [step, setStep] = useState("amount"); // amount | confirm | ready | claimed
+  const [amount, setAmount] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [transfer, setTransfer] = useState(null); // { id, token, claimUrl }
+  const [nfcState, setNfcState] = useState("idle"); // idle | waiting | tapped | unsupported | failed
+  const canvasRef = useRef(null);
+  const pollRef = useRef(null);
+
+  const canSend = Number(amount) > 0 && Number(amount) <= Number(wallet.balance || 0) && hasPin;
+
+  async function createTransfer() {
+    setSubmitting(true);
+    setError("");
+    const { data, error: fnError } = await supabase.functions.invoke("tap-transfer-create", {
+      body: { amount: Number(amount) },
+    });
+    setSubmitting(false);
+    if (fnError || !data?.ok) {
+      setError((data && data.error) || "Couldn't start this transfer.");
+      setStep("amount");
+      return;
+    }
+    const claimUrl = `${window.location.origin}/?tap=${data.token}`;
+    setTransfer({ id: data.id, token: data.token, claimUrl });
+    setStep("ready");
+  }
+
+  useEffect(() => {
+    if (step !== "ready" || !transfer) return;
+    if (canvasRef.current) {
+      QRCode.toCanvas(canvasRef.current, transfer.claimUrl, { width: 176, margin: 1 }).catch(() => {});
+    }
+    pollRef.current = setInterval(async () => {
+      const { data } = await supabase.from("tap_transfers").select("status").eq("id", transfer.id).single();
+      if (data?.status === "claimed") {
+        clearInterval(pollRef.current);
+        const { data: freshWallet } = await supabase.from("dva_wallets").select("balance").eq("id", wallet.id).single();
+        if (freshWallet) onClaimed(Number(freshWallet.balance));
+        setStep("claimed");
+      }
+    }, 2500);
+    return () => clearInterval(pollRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, transfer]);
+
+  async function tapPhones() {
+    if (!("NDEFReader" in window)) {
+      setNfcState("unsupported");
+      return;
+    }
+    setNfcState("waiting");
+    try {
+      const ndef = new window.NDEFReader();
+      await ndef.write({ records: [{ recordType: "url", data: transfer.claimUrl }] });
+      setNfcState("tapped");
+    } catch (_e) {
+      setNfcState("failed");
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "88vh" }}>
+        <div className="flex items-center gap-2 mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
+            Rota Tap
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+
+        {step === "amount" && (
+          <div className="flex flex-col gap-3">
+            <div>
+              <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+                Amount (₦)
+              </label>
+              <input
+                type="number"
+                autoFocus
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                className="w-full rounded-xl px-3 py-2.5 text-sm"
+                style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+              />
+            </div>
+            <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              Available balance: {naira(wallet.balance)}
+            </p>
+            {!hasPin && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                Set a transaction PIN in Profile → Settings before using Rota Tap.
+              </p>
+            )}
+            {Number(amount) > Number(wallet.balance || 0) && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                That's more than your available balance.
+              </p>
+            )}
+            {error && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                {error}
+              </p>
+            )}
+            <button
+              disabled={!canSend}
+              onClick={() => setStep("confirm")}
+              className="w-full rounded-full py-3 font-semibold text-sm mt-1 transition-transform active:scale-95"
+              style={{ background: canSend ? T.ok : T.ink3, color: canSend ? "#fff" : T.muted, fontFamily: FONT_BODY }}
+            >
+              Continue
+            </button>
+          </div>
+        )}
+
+        {step === "ready" && transfer && (
+          <div className="flex flex-col items-center gap-4 text-center">
+            <div style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-2xl font-semibold">
+              {naira(Number(amount))}
+            </div>
+
+            {"NDEFReader" in window && (
+              <button
+                onClick={tapPhones}
+                disabled={nfcState === "waiting"}
+                className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95"
+                style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+              >
+                {nfcState === "waiting" ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Wifi size={15} style={{ transform: "rotate(90deg)" }} />
+                )}
+                {nfcState === "waiting" ? "Hold near the other phone…" : nfcState === "tapped" ? "Tapped — try again?" : "Tap phones together"}
+              </button>
+            )}
+            {nfcState === "failed" && (
+              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                Couldn't complete the tap — use the QR code below instead.
+              </p>
+            )}
+
+            <div className="rounded-2xl p-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <canvas ref={canvasRef} />
+            </div>
+            <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              Or have them scan this QR code. Link expires in 10 minutes.
+            </p>
+            <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              <Loader2 size={11} className="animate-spin" /> Waiting for them to accept…
+            </p>
+          </div>
+        )}
+
+        {step === "claimed" && (
+          <div className="flex flex-col items-center gap-3 text-center py-4">
+            <div className="rounded-full flex items-center justify-center" style={{ width: 44, height: 44, background: T.ok }}>
+              <Check size={22} color="#fff" />
+            </div>
+            <p style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+              {naira(Number(amount))} sent
+            </p>
+            <button
+              onClick={onClose}
+              className="w-full rounded-full py-3 font-semibold text-sm mt-2 transition-transform active:scale-95"
+              style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+            >
+              Done
+            </button>
+          </div>
+        )}
+      </div>
+      {step === "confirm" && (
+        <ConfirmSheet
+          title="Confirm Rota Tap"
+          actionLabel="Confirm with PIN"
+          hasBiometric={hasBiometric}
+          onClose={() => setStep("amount")}
+          onConfirmed={() => {
+            createTransfer();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 /* ---------- Welcome ---------- */
 function WelcomeScreen({ onNext }) {
   return (
@@ -1111,6 +1311,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
   const [walletTxns, setWalletTxns] = useState([]);
   const [addMoneyOpen, setAddMoneyOpen] = useState(false);
   const [sendMoneyOpen, setSendMoneyOpen] = useState(false);
+  const [tapSendOpen, setTapSendOpen] = useState(false);
   const [walletHistoryOpen, setWalletHistoryOpen] = useState(false);
 
   const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
@@ -1244,6 +1445,18 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
           </span>
         </button>
       </div>
+
+      <button
+        onClick={() => setTapSendOpen(true)}
+        disabled={!wallet}
+        className="w-full rounded-2xl py-2.5 flex items-center justify-center gap-2 transition-transform active:scale-95"
+        style={{ background: "transparent", border: `1px dashed ${T.ink3}` }}
+      >
+        <Wifi size={14} color={T.gold} style={{ transform: "rotate(90deg)" }} />
+        <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs font-semibold">
+          Rota Tap
+        </span>
+      </button>
 
       {walletTxns.length > 0 && (
         <div>
@@ -1425,6 +1638,15 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
       )}
       {walletHistoryOpen && (
         <WalletHistorySheet transactions={walletTxns} onClose={() => setWalletHistoryOpen(false)} />
+      )}
+      {tapSendOpen && wallet && (
+        <TapSendSheet
+          wallet={wallet}
+          hasPin={settings.hasPin}
+          hasBiometric={settings.biometricRegistered}
+          onClose={() => setTapSendOpen(false)}
+          onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
+        />
       )}
     </div>
   );
@@ -3614,6 +3836,138 @@ function AuthScreen() {
   );
 }
 
+/* ---------- Rota Tap claim ---------- */
+// Reachable via ?tap=<token> without being signed in, so whoever tapped or
+// scanned the link can see who it's from and how much before deciding to
+// log in. Accepting requires an account (the money has to land in a
+// specific wallet) but never asks for a PIN — only the sender authorized
+// anything here.
+function TapClaimScreen({ token, user, onDone }) {
+  const [status, setStatus] = useState("loading"); // loading | ready | claiming | claimed | error
+  const [info, setInfo] = useState(null);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [claimedAmount, setClaimedAmount] = useState(null);
+  const [showAuth, setShowAuth] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    supabase.functions.invoke("tap-transfer-preview", { body: { token } }).then(({ data }) => {
+      if (!alive) return;
+      if (!data?.ok) {
+        setErrorMsg((data && data.error) || "This link isn't valid.");
+        setStatus("error");
+        return;
+      }
+      setInfo(data);
+      setStatus("ready");
+    });
+    return () => {
+      alive = false;
+    };
+  }, [token]);
+
+  async function accept() {
+    setStatus("claiming");
+    setErrorMsg("");
+    const { data, error } = await supabase.functions.invoke("tap-transfer-claim", { body: { token } });
+    if (error || !data?.ok) {
+      setErrorMsg((data && data.error) || "Couldn't accept this transfer.");
+      setStatus("ready");
+      return;
+    }
+    setClaimedAmount(data.amount);
+    setStatus("claimed");
+  }
+
+  return (
+    <div className="h-full flex flex-col justify-center px-7 text-center" style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}>
+      {status === "loading" && (
+        <div className="flex justify-center">
+          <Loader2 size={22} className="animate-spin" color={T.muted} />
+        </div>
+      )}
+
+      {status === "error" && (
+        <div>
+          <p style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold mb-2">
+            {errorMsg}
+          </p>
+          <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm">
+            Ask them to send a new Rota Tap.
+          </p>
+        </div>
+      )}
+
+      {(status === "ready" || status === "claiming") && info && (
+        <div className="flex flex-col items-center gap-4">
+          <div className="rounded-full flex items-center justify-center" style={{ width: 44, height: 44, background: T.gold }}>
+            <Wifi size={20} color={T.ink2} style={{ transform: "rotate(90deg)" }} />
+          </div>
+          <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm">
+            Incoming transfer from
+          </p>
+          <p style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-xl font-semibold">
+            {info.senderName}
+          </p>
+          <p style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-3xl font-semibold">
+            {naira(info.amount)}
+          </p>
+
+          {errorMsg && (
+            <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+              {errorMsg}
+            </p>
+          )}
+
+          {!user ? (
+            showAuth ? (
+              <div className="w-full mt-2">
+                <AuthScreen />
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowAuth(true)}
+                className="w-full rounded-2xl py-3.5 font-semibold text-sm mt-1 transition-transform active:scale-95"
+                style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+              >
+                Log in or sign up to accept
+              </button>
+            )
+          ) : (
+            <button
+              onClick={accept}
+              disabled={status === "claiming"}
+              className="w-full rounded-2xl py-3.5 font-semibold text-sm mt-1 flex items-center justify-center gap-2 transition-transform active:scale-95"
+              style={{ background: T.ok, color: "#fff", fontFamily: FONT_BODY }}
+            >
+              {status === "claiming" && <Loader2 size={14} className="animate-spin" />}
+              Accept
+            </button>
+          )}
+        </div>
+      )}
+
+      {status === "claimed" && (
+        <div className="flex flex-col items-center gap-3">
+          <div className="rounded-full flex items-center justify-center" style={{ width: 48, height: 48, background: T.ok }}>
+            <Check size={24} color="#fff" />
+          </div>
+          <p style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            {naira(claimedAmount)} added to your wallet
+          </p>
+          <button
+            onClick={onDone}
+            className="w-full rounded-2xl py-3.5 font-semibold text-sm mt-2 transition-transform active:scale-95"
+            style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+          >
+            Go to Rota
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------- Root ---------- */
 export default function RotaApp() {
   const [authLoading, setAuthLoading] = useState(true);
@@ -3623,6 +3977,7 @@ export default function RotaApp() {
   const [payments, setPayments] = useState([]);
   const [todos, setTodos] = useState([]);
   const [settings, setSettings] = useState(defaultSettings());
+  const [tapClaimToken, setTapClaimToken] = useState(() => new URLSearchParams(window.location.search).get("tap"));
 
   const loadUserData = useCallback(async (authUser) => {
     const [{ data: profileRow }, { data: paymentRows }, { data: todoRows }] = await Promise.all([
@@ -3945,6 +4300,27 @@ export default function RotaApp() {
       padding-top: max(24px, env(safe-area-inset-top));
     }
   `;
+
+  if (tapClaimToken) {
+    return (
+      <div className="w-full flex justify-center" style={{ background: T.ink3, minHeight: "100vh" }}>
+        <style>{globalStyles}</style>
+        <div
+          className="rota-shell w-full sm:max-w-lg relative overflow-hidden"
+          style={{ background: T.ink, borderLeft: `1px solid ${T.ink3}`, borderRight: `1px solid ${T.ink3}` }}
+        >
+          <TapClaimScreen
+            token={tapClaimToken}
+            user={user}
+            onDone={() => {
+              window.history.replaceState(null, "", "/");
+              setTapClaimToken(null);
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
 
   const isAppScreen = !authLoading && screen === "app";
 
