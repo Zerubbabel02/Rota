@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient.js";
 import { startRegistration, startAuthentication, browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import QRCode from "qrcode";
+import jsQR from "jsqr";
 import {
   Home as HomeIcon,
   Calendar,
@@ -36,6 +37,7 @@ import {
   Copy,
   ArrowLeftRight,
   Wifi,
+  Eye,
 } from "lucide-react";
 
 /* ---------- Design tokens ---------- */
@@ -213,6 +215,169 @@ function unmapSettings(partial) {
   if ("darkMode" in partial) out.dark_mode = partial.darkMode;
   if ("cardLinkSkipped" in partial) out.card_link_skipped = partial.cardLinkSkipped;
   return out;
+}
+
+// Custom "dotted" QR renderer — the default qrcode-package canvas output is
+// flat black-and-white squares; this redraws the same matrix as rounded
+// body dots with ring-and-dot finder markers instead, matching Rota's UI.
+function drawStyledQR(canvas, text, { size = 200, fg = "#FFFFFF", bg = "#0E0C15" } = {}) {
+  const qr = QRCode.create(text, { errorCorrectionLevel: "M" });
+  const n = qr.modules.size;
+  const data = qr.modules.data;
+  const cell = size / n;
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+
+  function roundedRect(x, y, w, h, r, fillStyle) {
+    ctx.fillStyle = fillStyle;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, size, size);
+
+  const isFinderZone = (r, c) => (r < 7 && c < 7) || (r < 7 && c >= n - 7) || (r >= n - 7 && c < 7);
+
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (!data[r * n + c] || isFinderZone(r, c)) continue;
+      const pad = cell * 0.14;
+      const s = cell - pad * 2;
+      roundedRect(c * cell + pad, r * cell + pad, s, s, s * 0.4, fg);
+    }
+  }
+
+  [
+    [0, 0],
+    [0, n - 7],
+    [n - 7, 0],
+  ].forEach(([r0, c0]) => {
+    const x0 = c0 * cell,
+      y0 = r0 * cell,
+      outer = 7 * cell;
+    roundedRect(x0, y0, outer, outer, outer * 0.22, fg);
+    roundedRect(x0 + cell, y0 + cell, outer - cell * 2, outer - cell * 2, (outer - cell * 2) * 0.25, bg);
+    const dot = outer - cell * 4;
+    roundedRect(x0 + cell * 2, y0 + cell * 2, dot, dot, dot * 0.3, fg);
+  });
+}
+
+// Blinking eye toggle for the balance figure — periodically does a quick
+// squish "blink" while the balance is visible, and stays shut (via the same
+// squish, held) once tapped to hide it. One icon, transform-only, so the
+// open/close reads as a single continuous motion rather than an icon swap.
+function BalanceEyeToggle({ hidden, onToggle }) {
+  const [blinking, setBlinking] = useState(false);
+  useEffect(() => {
+    if (hidden) return;
+    const id = setInterval(() => {
+      setBlinking(true);
+      setTimeout(() => setBlinking(false), 160);
+    }, 5000);
+    return () => clearInterval(id);
+  }, [hidden]);
+  const closed = hidden || blinking;
+  return (
+    <button
+      onClick={onToggle}
+      aria-label={hidden ? "Show balance" : "Hide balance"}
+      className="flex items-center justify-center flex-shrink-0"
+      style={{ background: "none", border: "none", padding: 2 }}
+    >
+      <Eye
+        size={14}
+        color={T.muted}
+        style={{ transform: closed ? "scaleY(0.12)" : "scaleY(1)", transition: "transform 0.16s ease", transformOrigin: "center" }}
+      />
+    </button>
+  );
+}
+
+// Live camera QR scanner — decodes frames with jsQR rather than pulling in a
+// full scanning library, so the camera view stays styled like the rest of
+// the sheet instead of a generic embedded widget.
+function QrScanner({ onResult, onCancel }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const rafRef = useRef(null);
+  const streamRef = useRef(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+
+    function tick() {
+      if (!alive) return;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code?.data) {
+          onResult(code.data);
+          return;
+        }
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    navigator.mediaDevices
+      ?.getUserMedia({ video: { facingMode: "environment" } })
+      .then((stream) => {
+        if (!alive) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play();
+        }
+        tick();
+      })
+      .catch(() => setError("Couldn't access the camera — check your browser's camera permission for this site."));
+
+    return () => {
+      alive = false;
+      cancelAnimationFrame(rafRef.current);
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="flex flex-col items-center gap-3 w-full">
+      {error ? (
+        <p className="text-xs text-center" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+          {error}
+        </p>
+      ) : (
+        <div className="relative rounded-2xl overflow-hidden" style={{ width: 220, height: 220, background: "#000" }}>
+          <video ref={videoRef} muted playsInline className="w-full h-full" style={{ objectFit: "cover" }} />
+          <div
+            className="absolute inset-6 rounded-2xl pointer-events-none"
+            style={{ border: `2px solid ${T.gold}`, opacity: 0.7 }}
+          />
+        </div>
+      )}
+      <canvas ref={canvasRef} className="hidden" />
+      <button onClick={onCancel} className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+        Cancel
+      </button>
+    </div>
+  );
 }
 
 /* ---------- Shared bits ---------- */
@@ -429,11 +594,19 @@ function SimulateInboundForm({ defaultBank = "", defaultName = "", hideNameBank,
   );
 }
 
-function AddMoneySheet({ wallet, onClose, onCredited }) {
+function AddMoneySheet({ wallet, onClose, onCredited, onClaimed, user }) {
   const [method, setMethod] = useState(null); // null = method list
   const [copied, setCopied] = useState(false);
   const [prefillBank, setPrefillBank] = useState("");
+  const [qrTab, setQrTab] = useState("mine"); // mine | scan
+  const qrCanvasRef = useRef(null);
   const kbInset = useKeyboardInset();
+
+  useEffect(() => {
+    if (method === "qr" && qrTab === "mine" && qrCanvasRef.current) {
+      drawStyledQR(qrCanvasRef.current, wallet.virtual_account_number, { size: 160, fg: T.paper, bg: T.ink2 });
+    }
+  }, [method, qrTab, wallet.virtual_account_number]);
 
   function copyAccountNumber() {
     navigator.clipboard?.writeText(wallet.virtual_account_number).then(() => {
@@ -564,18 +737,50 @@ function AddMoneySheet({ wallet, onClose, onCredited }) {
 
         {method === "qr" && (
           <div className="flex flex-col gap-4">
-            <div className="rounded-2xl p-6 flex flex-col items-center gap-3" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
-              <div
-                className="rounded-xl flex items-center justify-center"
-                style={{ width: 140, height: 140, background: T.ink2, border: `1px solid ${T.ink3}` }}
-              >
-                <QrCode size={72} color={T.paper} />
-              </div>
-              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs text-center">
-                Show this to any Rota user to receive a transfer straight into this account.
-              </p>
+            <div className="flex rounded-xl p-1" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              {[
+                { key: "mine", label: "My QR Code" },
+                { key: "scan", label: "Scan QR Code" },
+              ].map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => setQrTab(opt.key)}
+                  className="flex-1 rounded-lg py-2 text-xs font-semibold transition-colors"
+                  style={{
+                    fontFamily: FONT_BODY,
+                    background: qrTab === opt.key ? T.gold : "transparent",
+                    color: qrTab === opt.key ? T.ink2 : T.muted,
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
-            <SimulateInboundForm hideNameBank defaultName="QR payment" submitLabel="Simulate QR payment" onSubmit={onCredited} />
+
+            {qrTab === "mine" ? (
+              <>
+                <div className="rounded-2xl p-6 flex flex-col items-center gap-3" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+                  <div className="rounded-xl overflow-hidden" style={{ width: 160, height: 160 }}>
+                    <canvas ref={qrCanvasRef} />
+                  </div>
+                  <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs text-center">
+                    Show this to any Rota user to receive a transfer straight into this account.
+                  </p>
+                </div>
+                <SimulateInboundForm hideNameBank defaultName="QR payment" submitLabel="Simulate QR payment" onSubmit={onCredited} />
+              </>
+            ) : (
+              <div className="rounded-2xl p-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+                <ScanQrToClaim
+                  user={user}
+                  onCancel={() => setQrTab("mine")}
+                  onClaimed={(newBalance) => {
+                    onClaimed(newBalance);
+                    onClose();
+                  }}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -969,6 +1174,7 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onClose, onClaimed }) {
   const [submitting, setSubmitting] = useState(false);
   const [transfer, setTransfer] = useState(null); // { id, token, claimUrl }
   const [nfcState, setNfcState] = useState("idle"); // idle | waiting | tapped | unsupported | failed
+  const [claimedBy, setClaimedBy] = useState(null); // { name, avatarUrl }
   const canvasRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -994,12 +1200,17 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onClose, onClaimed }) {
   useEffect(() => {
     if (step !== "ready" || !transfer) return;
     if (canvasRef.current) {
-      QRCode.toCanvas(canvasRef.current, transfer.claimUrl, { width: 176, margin: 1 }).catch(() => {});
+      drawStyledQR(canvasRef.current, transfer.claimUrl, { size: 176, fg: "#FFFFFF", bg: T.ink });
     }
     pollRef.current = setInterval(async () => {
-      const { data } = await supabase.from("tap_transfers").select("status").eq("id", transfer.id).single();
+      const { data } = await supabase
+        .from("tap_transfers")
+        .select("status, claimed_by_name, claimed_by_avatar_url")
+        .eq("id", transfer.id)
+        .single();
       if (data?.status === "claimed") {
         clearInterval(pollRef.current);
+        setClaimedBy({ name: data.claimed_by_name, avatarUrl: data.claimed_by_avatar_url });
         const { data: freshWallet } = await supabase.from("dva_wallets").select("balance").eq("id", wallet.id).single();
         if (freshWallet) onClaimed(Number(freshWallet.balance));
         setStep("claimed");
@@ -1122,12 +1333,21 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onClose, onClaimed }) {
 
         {step === "claimed" && (
           <div className="flex flex-col items-center gap-3 text-center py-4">
-            <div className="rounded-full flex items-center justify-center" style={{ width: 44, height: 44, background: T.ok }}>
-              <Check size={22} color="#fff" />
-            </div>
+            {claimedBy?.avatarUrl ? (
+              <img src={claimedBy.avatarUrl} alt="" className="rounded-full" style={{ width: 44, height: 44, objectFit: "cover" }} />
+            ) : (
+              <div className="rounded-full flex items-center justify-center" style={{ width: 44, height: 44, background: T.ok }}>
+                <Check size={22} color="#fff" />
+              </div>
+            )}
             <p style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
               {naira(Number(amount))} sent
             </p>
+            {claimedBy?.name && (
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm -mt-1">
+                Accepted by {claimedBy.name}
+              </p>
+            )}
             <button
               onClick={onClose}
               className="w-full rounded-full py-3 font-semibold text-sm mt-2 transition-transform active:scale-95"
@@ -1149,6 +1369,149 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onClose, onClaimed }) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+// Simple two-option chooser shown when Rota Tap is opened from Home —
+// keeps TapSendSheet and TapReceiveSheet as separate, focused components
+// rather than one sheet trying to branch internally.
+function RotaTapChooser({ onSend, onReceive, onClose }) {
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="flex items-center gap-2 mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
+            Rota Tap
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-3">
+          <button
+            onClick={onSend}
+            className="rounded-2xl p-4 flex items-center gap-3 text-left transition-transform active:scale-95"
+            style={{ background: T.gold }}
+          >
+            <span className="rounded-full flex items-center justify-center flex-shrink-0" style={{ width: 34, height: 34, background: "rgba(0,0,0,0.14)" }}>
+              <ArrowUpRight size={16} color={T.ink2} />
+            </span>
+            <span>
+              <p style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-sm font-semibold">Send</p>
+              <p style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-xs opacity-80">Authorize an amount, tap or show a QR</p>
+            </span>
+          </button>
+          <button
+            onClick={onReceive}
+            className="rounded-2xl p-4 flex items-center gap-3 text-left transition-transform active:scale-95"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
+          >
+            <span className="rounded-full flex items-center justify-center flex-shrink-0" style={{ width: 34, height: 34, background: T.ink3 }}>
+              <ArrowDownLeft size={16} color={T.paper} />
+            </span>
+            <span>
+              <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">Receive</p>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">Scan a QR code, or wait for an NFC tap</p>
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Shared by Rota Tap's Receive sheet and Add Money's "Scan QR Code" tab.
+// Runs the camera scanner and a best-effort Web NFC scan() listener at the
+// same time — whichever produces a claim token first wins. NFC peer-to-peer
+// support varies a lot by device, so the camera is the guaranteed-to-work
+// path; NFC is a bonus if it happens to connect. Callers only ever mount
+// this while already signed in, so it goes straight to the Accept UI.
+function ScanQrToClaim({ user, onClaimed, onCancel }) {
+  const [scannedToken, setScannedToken] = useState(null);
+  const [nfcListening, setNfcListening] = useState(false);
+
+  useEffect(() => {
+    if (scannedToken || !("NDEFReader" in window)) return;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const ndef = new window.NDEFReader();
+        await ndef.scan({ signal: controller.signal });
+        setNfcListening(true);
+        ndef.addEventListener(
+          "reading",
+          (event) => {
+            for (const record of event.message.records) {
+              if (record.recordType !== "url") continue;
+              try {
+                const text = new TextDecoder(record.encoding || "utf-8").decode(record.data);
+                const t = new URL(text).searchParams.get("tap");
+                if (t) setScannedToken(t);
+              } catch {
+                // Not a URL we recognize — ignore this record.
+              }
+            }
+          },
+          { signal: controller.signal }
+        );
+      } catch {
+        setNfcListening(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [scannedToken]);
+
+  function handleScanResult(data) {
+    try {
+      const t = new URL(data).searchParams.get("tap");
+      setScannedToken(t || data);
+    } catch {
+      setScannedToken(data);
+    }
+  }
+
+  if (scannedToken) {
+    return <TapClaimBody token={scannedToken} user={user} onDone={(newBalance) => onClaimed(newBalance)} />;
+  }
+  return (
+    <div className="flex flex-col items-center gap-3">
+      <QrScanner onResult={handleScanResult} onCancel={onCancel} />
+      {nfcListening && (
+        <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+          <Wifi size={11} style={{ transform: "rotate(90deg)" }} /> Also listening for an NFC tap…
+        </p>
+      )}
+      <p className="text-xs text-center" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+        Point your camera at the sender's QR code.
+      </p>
+    </div>
+  );
+}
+
+function TapReceiveSheet({ user, onClose, onClaimed }) {
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "88vh" }}>
+        <div className="flex items-center gap-2 mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
+            Scan to receive
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+        <ScanQrToClaim
+          user={user}
+          onCancel={onClose}
+          onClaimed={(newBalance) => {
+            onClaimed(newBalance);
+            onClose();
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -1304,15 +1667,16 @@ function LinkScreen({ email, onLinked, onSkip }) {
 }
 
 /* ---------- Home tab ---------- */
-function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
+function HomeTab({ payments, todos, settings, goTab, onUpdate, user }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [walletLoading, setWalletLoading] = useState(true);
   const [walletTxns, setWalletTxns] = useState([]);
   const [addMoneyOpen, setAddMoneyOpen] = useState(false);
   const [sendMoneyOpen, setSendMoneyOpen] = useState(false);
-  const [tapSendOpen, setTapSendOpen] = useState(false);
+  const [tapMode, setTapMode] = useState(null); // null | choose | send | receive
   const [walletHistoryOpen, setWalletHistoryOpen] = useState(false);
+  const [balanceHidden, setBalanceHidden] = useState(false);
 
   const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
   const totalPaid = payments.filter((p) => p.status === "paid").reduce((s, p) => s + p.amount, 0);
@@ -1385,8 +1749,9 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
 
       <div className="rounded-2xl p-4 flex items-center justify-between gap-3" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="min-w-0">
-          <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-            Balance
+          <span className="flex items-center gap-1.5" style={{ fontFamily: FONT_BODY, color: T.muted }}>
+            <span className="text-xs">Balance</span>
+            <BalanceEyeToggle hidden={balanceHidden} onToggle={() => setBalanceHidden((v) => !v)} />
           </span>
           {walletLoading ? (
             <div className="py-1.5">
@@ -1394,7 +1759,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
             </div>
           ) : (
             <div style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-2xl font-semibold">
-              {naira(wallet?.balance || 0)}
+              {balanceHidden ? "₦ • • • • • •" : naira(wallet?.balance || 0)}
             </div>
           )}
         </div>
@@ -1411,52 +1776,51 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
         </button>
       </div>
 
-      <div className="flex gap-3">
+      <div className="flex gap-2">
         <button
           onClick={() => setAddMoneyOpen(true)}
           disabled={!wallet}
-          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2.5 transition-transform active:scale-95"
+          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2 transition-transform active:scale-95"
           style={{ background: T.gold }}
         >
           <span
             className="rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ width: 24, height: 24, background: "rgba(0,0,0,0.14)" }}
+            style={{ width: 22, height: 22, background: "rgba(0,0,0,0.14)" }}
           >
-            <ArrowDownLeft size={14} color={T.ink2} strokeWidth={2.6} />
+            <ArrowDownLeft size={13} color={T.ink2} strokeWidth={2.6} />
           </span>
-          <span style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-sm font-semibold">
+          <span style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-xs font-semibold">
             Add Money
+          </span>
+        </button>
+        <button
+          onClick={() => setTapMode("choose")}
+          disabled={!wallet}
+          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2 transition-transform active:scale-95"
+          style={{ background: `${T.gold}1F`, border: `1.5px solid ${T.gold}` }}
+        >
+          <Wifi size={15} color={T.gold} strokeWidth={2.6} style={{ transform: "rotate(90deg)" }} />
+          <span style={{ fontFamily: FONT_BODY, color: T.gold }} className="text-xs font-semibold">
+            Rota Tap
           </span>
         </button>
         <button
           onClick={() => setSendMoneyOpen(true)}
           disabled={!wallet}
-          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2.5 transition-transform active:scale-95"
+          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2 transition-transform active:scale-95"
           style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
         >
           <span
             className="rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ width: 24, height: 24, background: T.ink3 }}
+            style={{ width: 22, height: 22, background: T.ink3 }}
           >
-            <ArrowUpRight size={14} color={T.paper} strokeWidth={2.6} />
+            <ArrowUpRight size={13} color={T.paper} strokeWidth={2.6} />
           </span>
-          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">
+          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs font-semibold">
             Send Money
           </span>
         </button>
       </div>
-
-      <button
-        onClick={() => setTapSendOpen(true)}
-        disabled={!wallet}
-        className="w-full rounded-2xl py-2.5 flex items-center justify-center gap-2 transition-transform active:scale-95"
-        style={{ background: "transparent", border: `1px dashed ${T.ink3}` }}
-      >
-        <Wifi size={14} color={T.gold} style={{ transform: "rotate(90deg)" }} />
-        <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs font-semibold">
-          Rota Tap
-        </span>
-      </button>
 
       {walletTxns.length > 0 && (
         <div>
@@ -1614,6 +1978,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
       {addMoneyOpen && wallet && (
         <AddMoneySheet
           wallet={wallet}
+          user={user}
           onClose={() => setAddMoneyOpen(false)}
           onCredited={async ({ amount, name, bank }) => {
             const { data } = await supabase.functions.invoke("dva-wallet-action", {
@@ -1622,6 +1987,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
             if (data?.balance !== undefined) refreshWalletBalance(data.balance);
             setAddMoneyOpen(false);
           }}
+          onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
         />
       )}
       {sendMoneyOpen && wallet && (
@@ -1639,12 +2005,26 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate }) {
       {walletHistoryOpen && (
         <WalletHistorySheet transactions={walletTxns} onClose={() => setWalletHistoryOpen(false)} />
       )}
-      {tapSendOpen && wallet && (
+      {tapMode === "choose" && (
+        <RotaTapChooser
+          onSend={() => setTapMode("send")}
+          onReceive={() => setTapMode("receive")}
+          onClose={() => setTapMode(null)}
+        />
+      )}
+      {tapMode === "send" && wallet && (
         <TapSendSheet
           wallet={wallet}
           hasPin={settings.hasPin}
           hasBiometric={settings.biometricRegistered}
-          onClose={() => setTapSendOpen(false)}
+          onClose={() => setTapMode(null)}
+          onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
+        />
+      )}
+      {tapMode === "receive" && (
+        <TapReceiveSheet
+          user={user}
+          onClose={() => setTapMode(null)}
           onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
         />
       )}
@@ -3837,16 +4217,18 @@ function AuthScreen() {
 }
 
 /* ---------- Rota Tap claim ---------- */
-// Reachable via ?tap=<token> without being signed in, so whoever tapped or
-// scanned the link can see who it's from and how much before deciding to
-// log in. Accepting requires an account (the money has to land in a
-// specific wallet) but never asks for a PIN — only the sender authorized
-// anything here.
-function TapClaimScreen({ token, user, onDone }) {
+// The reusable guts of claiming a Rota Tap — usable both as a full page
+// (reachable via ?tap=<token>, works without being signed in) and embedded
+// inline inside a sheet right after a QR scan or NFC read, since within the
+// app the user is already authenticated. Accepting never asks for a PIN —
+// only the sender authorized anything here. onDone receives the receiver's
+// fresh wallet balance so callers can update already-mounted state.
+function TapClaimBody({ token, user, onDone }) {
   const [status, setStatus] = useState("loading"); // loading | ready | claiming | claimed | error
   const [info, setInfo] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [claimedAmount, setClaimedAmount] = useState(null);
+  const [newBalance, setNewBalance] = useState(null);
   const [showAuth, setShowAuth] = useState(false);
 
   useEffect(() => {
@@ -3876,13 +4258,14 @@ function TapClaimScreen({ token, user, onDone }) {
       return;
     }
     setClaimedAmount(data.amount);
+    setNewBalance(data.newBalance);
     setStatus("claimed");
   }
 
   return (
-    <div className="h-full flex flex-col justify-center px-7 text-center" style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}>
+    <div className="flex flex-col items-center text-center w-full">
       {status === "loading" && (
-        <div className="flex justify-center">
+        <div className="flex justify-center py-6">
           <Loader2 size={22} className="animate-spin" color={T.muted} />
         </div>
       )}
@@ -3899,7 +4282,7 @@ function TapClaimScreen({ token, user, onDone }) {
       )}
 
       {(status === "ready" || status === "claiming") && info && (
-        <div className="flex flex-col items-center gap-4">
+        <div className="flex flex-col items-center gap-4 w-full">
           <div className="rounded-full flex items-center justify-center" style={{ width: 44, height: 44, background: T.gold }}>
             <Wifi size={20} color={T.ink2} style={{ transform: "rotate(90deg)" }} />
           </div>
@@ -3948,7 +4331,7 @@ function TapClaimScreen({ token, user, onDone }) {
       )}
 
       {status === "claimed" && (
-        <div className="flex flex-col items-center gap-3">
+        <div className="flex flex-col items-center gap-3 w-full">
           <div className="rounded-full flex items-center justify-center" style={{ width: 48, height: 48, background: T.ok }}>
             <Check size={24} color="#fff" />
           </div>
@@ -3956,7 +4339,7 @@ function TapClaimScreen({ token, user, onDone }) {
             {naira(claimedAmount)} added to your wallet
           </p>
           <button
-            onClick={onDone}
+            onClick={() => onDone(newBalance)}
             className="w-full rounded-2xl py-3.5 font-semibold text-sm mt-2 transition-transform active:scale-95"
             style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
           >
@@ -3964,6 +4347,16 @@ function TapClaimScreen({ token, user, onDone }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// Page-level wrapper for the ?tap=<token> route — adds the full-height
+// centered layout TapClaimBody doesn't need when it's embedded in a sheet.
+function TapClaimScreen({ token, user, onDone }) {
+  return (
+    <div className="h-full flex flex-col justify-center px-7" style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}>
+      <TapClaimBody token={token} user={user} onDone={onDone} />
     </div>
   );
 }
@@ -4373,7 +4766,7 @@ export default function RotaApp() {
           />
           <div className="flex-1 overflow-y-auto rota-scroll-pad">
             <div className="max-w-2xl mx-auto w-full">
-              {tab === "home" && <HomeTab payments={payments} todos={todos} settings={settings} goTab={setTab} onUpdate={updateSettings} />}
+              {tab === "home" && <HomeTab payments={payments} todos={todos} settings={settings} goTab={setTab} onUpdate={updateSettings} user={user} />}
               {tab === "schedule" && (
                 <ScheduleTab
                   payments={payments}

@@ -94,10 +94,17 @@ Deno.serve(async (req) => {
       receiverWallet = created;
     }
 
+    const [{ data: senderProfile }, { data: receiverProfile }] = await Promise.all([
+      supabaseAdmin.from("profiles").select("name, avatar_url").eq("id", transfer.sender_user_id).maybeSingle(),
+      supabaseAdmin.from("profiles").select("name, avatar_url").eq("id", receiverId).maybeSingle(),
+    ]);
+
     // Atomically claim the transfer before touching any money — the extra
     // .eq("status", "pending") means only one concurrent claim can win this
     // update; a second tap on the same link finds zero rows affected and
-    // bails out instead of double-spending it.
+    // bails out instead of double-spending it. The receiver's name/avatar
+    // are snapshotted here so the sender's screen can show who accepted
+    // without needing to read another user's profile row directly.
     const { data: claimedRows, error: claimErr } = await supabaseAdmin
       .from("tap_transfers")
       .update({
@@ -105,6 +112,8 @@ Deno.serve(async (req) => {
         claimed_by_user_id: receiverId,
         claimed_wallet_id: receiverWallet.id,
         claimed_at: new Date().toISOString(),
+        claimed_by_name: receiverProfile?.name || "A Rota user",
+        claimed_by_avatar_url: receiverProfile?.avatar_url || null,
       })
       .eq("id", transfer.id)
       .eq("status", "pending")
@@ -112,11 +121,6 @@ Deno.serve(async (req) => {
     if (claimErr || !claimedRows || claimedRows.length === 0) {
       return json({ error: "This transfer was just claimed or expired — refresh and try again." }, 409);
     }
-
-    const [{ data: senderProfile }, { data: receiverProfile }] = await Promise.all([
-      supabaseAdmin.from("profiles").select("name").eq("id", transfer.sender_user_id).maybeSingle(),
-      supabaseAdmin.from("profiles").select("name").eq("id", receiverId).maybeSingle(),
-    ]);
 
     const newSenderBalance = Number(senderWallet.balance) - amt;
     const newReceiverBalance = Number(receiverWallet.balance) + amt;
