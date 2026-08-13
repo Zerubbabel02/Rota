@@ -1163,17 +1163,18 @@ function SendMoneySheet({ wallet, hasPin, hasBiometric, onClose, onSent }) {
 /* ---------- Rota Tap ---------- */
 // The sender authorizes an amount with PIN/biometric up front (same
 // ConfirmSheet everything else uses), which opens a 10-minute claim window
-// on the server. Nothing moves until the other person accepts — via NFC tap
-// where Web NFC exists (Chrome/Android only) or by scanning the QR code
-// everywhere else, including iPhone. Money debits from the sender only once
-// the receiver taps Accept, not at creation time.
+// on the server. Nothing moves until the other person scans the QR code and
+// accepts — deliberately camera-only, not NFC: Web NFC can only read/write
+// passive tags, never exchange data with another active phone, so there's
+// no browser API that could make a real phone-to-phone tap work here.
+// Camera + QR works identically on a phone or a laptop webcam instead.
+// Money debits from the sender only once the receiver taps Accept.
 function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed }) {
   const [step, setStep] = useState("amount"); // amount | confirm | ready | claimed
   const [amount, setAmount] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [transfer, setTransfer] = useState(null); // { id, token, claimUrl }
-  const [nfcState, setNfcState] = useState("idle"); // idle | waiting | tapped | unsupported | failed
   const [claimedBy, setClaimedBy] = useState(null); // { name, avatarUrl }
   const canvasRef = useRef(null);
   const pollRef = useRef(null);
@@ -1219,21 +1220,6 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
     return () => clearInterval(pollRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, transfer]);
-
-  async function tapPhones() {
-    if (!("NDEFReader" in window)) {
-      setNfcState("unsupported");
-      return;
-    }
-    setNfcState("waiting");
-    try {
-      const ndef = new window.NDEFReader();
-      await ndef.write({ records: [{ recordType: "url", data: transfer.claimUrl }] });
-      setNfcState("tapped");
-    } catch (_e) {
-      setNfcState("failed");
-    }
-  }
 
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
@@ -1303,32 +1289,11 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
               {naira(Number(amount))}
             </div>
 
-            {"NDEFReader" in window && (
-              <button
-                onClick={tapPhones}
-                disabled={nfcState === "waiting"}
-                className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95"
-                style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
-              >
-                {nfcState === "waiting" ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <Wifi size={15} style={{ transform: "rotate(90deg)" }} />
-                )}
-                {nfcState === "waiting" ? "Hold near the other phone…" : nfcState === "tapped" ? "Tapped — try again?" : "Tap phones together"}
-              </button>
-            )}
-            {nfcState === "failed" && (
-              <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
-                Couldn't complete the tap — use the QR code below instead.
-              </p>
-            )}
-
             <div className="rounded-2xl p-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
               <canvas ref={canvasRef} />
             </div>
             <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
-              Or have them scan this QR code. Link expires in 10 minutes.
+              Have them scan this with their camera — works on any phone or laptop. Link expires in 10 minutes.
             </p>
             <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
               <Loader2 size={11} className="animate-spin" /> Waiting for them to accept…
@@ -1405,7 +1370,7 @@ function RotaTapChooser({ onSend, onReceive, onClose }) {
             </span>
             <span>
               <p style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-sm font-semibold">Send</p>
-              <p style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-xs opacity-80">Authorize an amount, tap or show a QR</p>
+              <p style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-xs opacity-80">Authorize an amount, then show a QR code</p>
             </span>
           </button>
           <button
@@ -1418,7 +1383,7 @@ function RotaTapChooser({ onSend, onReceive, onClose }) {
             </span>
             <span>
               <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">Receive</p>
-              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">Scan a QR code, or wait for an NFC tap</p>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">Scan the sender's QR code with your camera</p>
             </span>
           </button>
         </div>
@@ -1428,45 +1393,14 @@ function RotaTapChooser({ onSend, onReceive, onClose }) {
 }
 
 // Shared by Rota Tap's Receive sheet and Add Money's "Scan QR Code" tab.
-// Runs the camera scanner and a best-effort Web NFC scan() listener at the
-// same time — whichever produces a claim token first wins. NFC peer-to-peer
-// support varies a lot by device, so the camera is the guaranteed-to-work
-// path; NFC is a bonus if it happens to connect. Callers only ever mount
-// this while already signed in, so it goes straight to the Accept UI.
+// Camera-only: NFC has no phone-to-phone data exchange primitive in any
+// browser (Web NFC only reads/writes passive tags, never another active
+// device), so a "listen for NFC" path here would never fire on any device.
+// The camera works identically on a phone or a laptop webcam — no special
+// hardware needed on either side. Callers only ever mount this while
+// already signed in, so it goes straight to the Accept UI.
 function ScanQrToClaim({ user, onClaimed, onCancel }) {
   const [scannedToken, setScannedToken] = useState(null);
-  const [nfcListening, setNfcListening] = useState(false);
-
-  useEffect(() => {
-    if (scannedToken || !("NDEFReader" in window)) return;
-    const controller = new AbortController();
-    (async () => {
-      try {
-        const ndef = new window.NDEFReader();
-        await ndef.scan({ signal: controller.signal });
-        setNfcListening(true);
-        ndef.addEventListener(
-          "reading",
-          (event) => {
-            for (const record of event.message.records) {
-              if (record.recordType !== "url") continue;
-              try {
-                const text = new TextDecoder(record.encoding || "utf-8").decode(record.data);
-                const t = new URL(text).searchParams.get("tap");
-                if (t) setScannedToken(t);
-              } catch {
-                // Not a URL we recognize — ignore this record.
-              }
-            }
-          },
-          { signal: controller.signal }
-        );
-      } catch {
-        setNfcListening(false);
-      }
-    })();
-    return () => controller.abort();
-  }, [scannedToken]);
 
   function handleScanResult(data) {
     try {
@@ -1483,13 +1417,8 @@ function ScanQrToClaim({ user, onClaimed, onCancel }) {
   return (
     <div className="flex flex-col items-center gap-3">
       <QrScanner onResult={handleScanResult} onCancel={onCancel} />
-      {nfcListening && (
-        <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
-          <Wifi size={11} style={{ transform: "rotate(90deg)" }} /> Also listening for an NFC tap…
-        </p>
-      )}
       <p className="text-xs text-center" style={{ color: T.muted, fontFamily: FONT_BODY }}>
-        Point your camera at the sender's QR code.
+        Point your camera at the sender's QR code — works from a phone or a laptop webcam.
       </p>
     </div>
   );
@@ -4232,8 +4161,8 @@ function AuthScreen() {
 /* ---------- Rota Tap claim ---------- */
 // The reusable guts of claiming a Rota Tap — usable both as a full page
 // (reachable via ?tap=<token>, works without being signed in) and embedded
-// inline inside a sheet right after a QR scan or NFC read, since within the
-// app the user is already authenticated. Accepting never asks for a PIN —
+// inline inside a sheet right after a QR scan, since within the app the
+// user is already authenticated. Accepting never asks for a PIN —
 // only the sender authorized anything here. onDone receives the receiver's
 // fresh wallet balance so callers can update already-mounted state.
 function TapClaimBody({ token, user, onDone }) {
