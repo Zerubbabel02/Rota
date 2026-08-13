@@ -1167,7 +1167,7 @@ function SendMoneySheet({ wallet, hasPin, hasBiometric, onClose, onSent }) {
 // where Web NFC exists (Chrome/Android only) or by scanning the QR code
 // everywhere else, including iPhone. Money debits from the sender only once
 // the receiver taps Accept, not at creation time.
-function TapSendSheet({ wallet, hasPin, hasBiometric, onClose, onClaimed }) {
+function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed }) {
   const [step, setStep] = useState("amount"); // amount | confirm | ready | claimed
   const [amount, setAmount] = useState("");
   const [error, setError] = useState("");
@@ -1240,6 +1240,11 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onClose, onClaimed }) {
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
       <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "88vh" }}>
         <div className="flex items-center gap-2 mb-4">
+          {step === "amount" && (
+            <button onClick={onBack} className="flex-shrink-0">
+              <ChevronDown size={18} color={T.muted} style={{ transform: "rotate(90deg)" }} />
+            </button>
+          )}
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
             Rota Tap
           </h3>
@@ -1490,12 +1495,15 @@ function ScanQrToClaim({ user, onClaimed, onCancel }) {
   );
 }
 
-function TapReceiveSheet({ user, onClose, onClaimed }) {
+function TapReceiveSheet({ user, onBack, onClose, onClaimed }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
       <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "88vh" }}>
         <div className="flex items-center gap-2 mb-4">
+          <button onClick={onBack} className="flex-shrink-0">
+            <ChevronDown size={18} color={T.muted} style={{ transform: "rotate(90deg)" }} />
+          </button>
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
             Scan to receive
           </h3>
@@ -1776,48 +1784,51 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user }) {
         </button>
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex gap-3">
         <button
           onClick={() => setAddMoneyOpen(true)}
           disabled={!wallet}
-          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2 transition-transform active:scale-95"
+          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2.5 transition-transform active:scale-95"
           style={{ background: T.gold }}
         >
           <span
             className="rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ width: 22, height: 22, background: "rgba(0,0,0,0.14)" }}
+            style={{ width: 24, height: 24, background: "rgba(0,0,0,0.14)" }}
           >
-            <ArrowDownLeft size={13} color={T.ink2} strokeWidth={2.6} />
+            <ArrowDownLeft size={14} color={T.ink2} strokeWidth={2.6} />
           </span>
-          <span style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-xs font-semibold">
+          <span style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-sm font-semibold">
             Add Money
-          </span>
-        </button>
-        <button
-          onClick={() => setTapMode("choose")}
-          disabled={!wallet}
-          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2 transition-transform active:scale-95"
-          style={{ background: `${T.gold}1F`, border: `1.5px solid ${T.gold}` }}
-        >
-          <Wifi size={15} color={T.gold} strokeWidth={2.6} style={{ transform: "rotate(90deg)" }} />
-          <span style={{ fontFamily: FONT_BODY, color: T.gold }} className="text-xs font-semibold">
-            Rota Tap
           </span>
         </button>
         <button
           onClick={() => setSendMoneyOpen(true)}
           disabled={!wallet}
-          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2 transition-transform active:scale-95"
+          className="flex-1 rounded-2xl py-3 flex items-center justify-center gap-2.5 transition-transform active:scale-95"
           style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
         >
           <span
             className="rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ width: 22, height: 22, background: T.ink3 }}
+            style={{ width: 24, height: 24, background: T.ink3 }}
           >
-            <ArrowUpRight size={13} color={T.paper} strokeWidth={2.6} />
+            <ArrowUpRight size={14} color={T.paper} strokeWidth={2.6} />
           </span>
-          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs font-semibold">
+          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">
             Send Money
+          </span>
+        </button>
+      </div>
+
+      <div className="flex justify-center">
+        <button
+          onClick={() => setTapMode("choose")}
+          disabled={!wallet}
+          className="w-1/2 rounded-2xl py-3 flex items-center justify-center gap-2 transition-transform active:scale-95"
+          style={{ background: `${T.gold}1F`, border: `1.5px solid ${T.gold}` }}
+        >
+          <Wifi size={15} color={T.gold} strokeWidth={2.6} style={{ transform: "rotate(90deg)" }} />
+          <span style={{ fontFamily: FONT_BODY, color: T.gold }} className="text-sm font-semibold">
+            Rota Tap
           </span>
         </button>
       </div>
@@ -2017,6 +2028,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user }) {
           wallet={wallet}
           hasPin={settings.hasPin}
           hasBiometric={settings.biometricRegistered}
+          onBack={() => setTapMode("choose")}
           onClose={() => setTapMode(null)}
           onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
         />
@@ -2024,6 +2036,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user }) {
       {tapMode === "receive" && (
         <TapReceiveSheet
           user={user}
+          onBack={() => setTapMode("choose")}
           onClose={() => setTapMode(null)}
           onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
         />
