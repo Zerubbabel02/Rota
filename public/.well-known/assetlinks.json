@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.get_login_creds"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.rota.app",
+      "sha256_cert_fingerprints": [
+        "3F:3A:97:FE:8E:34:19:F8:80:9A:07:EF:A5:8A:4A:D5:CF:00:A3:C4:27:A4:28:C7:BE:F8:AD:A5:AB:5B:02:DD"
+      ]
+    }
+  }
+]
