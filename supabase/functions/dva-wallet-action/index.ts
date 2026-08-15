@@ -13,6 +13,27 @@ function json(body: unknown, status = 200) {
   });
 }
 
+function naira(n: number) {
+  return `₦${Number(n).toLocaleString("en-NG")}`;
+}
+
+// Best-effort — a notification failing should never fail the transaction
+// itself, so this is deliberately not awaited by its caller.
+async function sendPush(userId: string, title: string, body: string) {
+  try {
+    await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/send-push`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ userId, title, body }),
+    });
+  } catch (_e) {
+    // notification is best-effort
+  }
+}
+
 // 'credit' stands in for what a Paystack DVA webhook (charge.success on the
 // dedicated account) would do automatically in production when someone
 // transfers money in from any Nigerian bank.
@@ -77,6 +98,14 @@ Deno.serve(async (req) => {
       .select()
       .single();
     if (txnErr) return json({ error: "Could not record transaction" }, 500);
+
+    sendPush(
+      wallet.user_id,
+      action === "credit" ? "Money received" : "Payment sent",
+      action === "credit"
+        ? `You received ${naira(amt)}${counterparty_name ? ` from ${counterparty_name}` : ""}.`
+        : `${naira(amt)} was sent${description ? ` — ${description}` : ""}.`
+    );
 
     return json({ balance: newBalance, transaction: txn });
   } catch (_e) {

@@ -13,6 +13,27 @@ function json(body: unknown, status = 200) {
   });
 }
 
+function naira(n: number) {
+  return `₦${Number(n).toLocaleString("en-NG")}`;
+}
+
+// Best-effort — a notification failing should never fail the transfer
+// itself, so this is deliberately not awaited by its caller.
+async function sendPush(userId: string, title: string, body: string) {
+  try {
+    await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/send-push`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ userId, title, body }),
+    });
+  } catch (_e) {
+    // notification is best-effort
+  }
+}
+
 function demoAccountNumber() {
   let n = "90";
   for (let i = 0; i < 8; i++) n += Math.floor(Math.random() * 10);
@@ -164,6 +185,17 @@ Deno.serve(async (req) => {
         reference,
       },
     ]);
+
+    sendPush(
+      transfer.sender_user_id,
+      "Money sent",
+      `Your ${naira(amt)} Rota Tap was accepted by ${receiverProfile?.name || "a Rota user"}.`
+    );
+    sendPush(
+      receiverId,
+      "Money received",
+      `You received ${naira(amt)} via Rota Tap from ${senderProfile?.name || "a Rota user"}.`
+    );
 
     return json({ ok: true, amount: amt, senderName: senderProfile?.name || "A Rota user", newBalance: newReceiverBalance });
   } catch (_e) {
