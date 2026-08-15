@@ -13,18 +13,6 @@ function json(body: unknown, status = 200) {
   });
 }
 
-// Internal-only: callers must present the service role key, not a regular
-// user session — otherwise any signed-in user could spam a push to any
-// other user just by knowing their id.
-function decodeJwtRole(jwt: string): string | null {
-  try {
-    const payload = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-    return payload.role || null;
-  } catch {
-    return null;
-  }
-}
-
 function pemToArrayBuffer(pem: string): ArrayBuffer {
   const b64 = pem
     .replace(/-----BEGIN PRIVATE KEY-----/, "")
@@ -83,9 +71,14 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS_HEADERS });
 
   try {
+    // Internal-only: callers must present the actual service role key, not
+    // a regular user session — otherwise any signed-in user could spam a
+    // push to any other user just by knowing their id. Compared directly
+    // rather than by decoding a JWT "role" claim, since this project's
+    // service role key is the newer opaque sb_secret_... format, not a JWT.
     const authHeader = req.headers.get("Authorization") ?? "";
-    const jwt = authHeader.replace(/^Bearer\s+/i, "");
-    if (decodeJwtRole(jwt) !== "service_role") {
+    const presentedKey = authHeader.replace(/^Bearer\s+/i, "");
+    if (!presentedKey || presentedKey !== Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")) {
       return json({ error: "Forbidden — internal use only" }, 403);
     }
 
