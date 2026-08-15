@@ -237,6 +237,20 @@ function unmapSettings(partial) {
 // Custom "dotted" QR renderer — the default qrcode-package canvas output is
 // flat black-and-white squares; this redraws the same matrix as rounded
 // body dots with ring-and-dot finder markers instead, matching Rota's UI.
+// Cached so repeated receipt generation doesn't re-fetch the icon each time.
+let _logoImagePromise = null;
+function loadLogoImage() {
+  if (!_logoImagePromise) {
+    _logoImagePromise = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = "/icons/icon-96.png";
+    });
+  }
+  return _logoImagePromise;
+}
+
 function drawStyledQR(canvas, text, { size = 200, fg = "#FFFFFF", bg = "#0E0C15" } = {}) {
   const qr = QRCode.create(text, { errorCorrectionLevel: "M" });
   const n = qr.modules.size;
@@ -1658,7 +1672,7 @@ function LinkScreen({ email, onLinked, onSkip }) {
 }
 
 /* ---------- Home tab ---------- */
-function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometricConfirm }) {
+function HomeTab({ payments, settings, goTab, onUpdate, user, hasBiometricConfirm }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [walletLoading, setWalletLoading] = useState(true);
@@ -1668,15 +1682,9 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
   const [tapMode, setTapMode] = useState(null); // null | choose | send | receive
   const [walletHistoryOpen, setWalletHistoryOpen] = useState(false);
   const [balanceHidden, setBalanceHidden] = useState(false);
+  const [walletReceiptFor, setWalletReceiptFor] = useState(null);
 
-  const upcoming = payments.filter((p) => p.status === "upcoming").sort((a, b) => a.date.localeCompare(b.date));
-  const next = upcoming[0];
-  const pendingTodos = todos.filter((t) => !t.done).length;
   const failedCount = payments.filter((p) => p.status === "failed").length;
-  const recentPaid = payments
-    .filter((p) => p.status === "paid")
-    .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 3);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -1831,7 +1839,12 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
           </div>
           <div className="flex flex-col gap-2">
             {walletTxns.slice(0, 2).map((t) => (
-              <div key={t.id} className="rounded-xl p-3 flex items-center justify-between" style={{ background: T.ink2 }}>
+              <div
+                key={t.id}
+                onClick={() => setWalletReceiptFor(t)}
+                className="rounded-xl p-3 flex items-center justify-between cursor-pointer"
+                style={{ background: T.ink2 }}
+              >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div
                     className="rounded-full flex items-center justify-center flex-shrink-0"
@@ -1866,30 +1879,6 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
         </div>
       )}
 
-      {next && (
-        <button
-          onClick={() => goTab("schedule")}
-          className="rounded-2xl p-4 text-left"
-          style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
-        >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl flex items-center justify-center" style={{ width: 38, height: 38, background: T.ink3 }}>
-                <Clock size={17} color={T.gold} />
-              </div>
-              <div>
-                <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-medium">
-                  {next.name}
-                </p>
-                <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-                  {daysAway(next.date)} · {naira(next.amount)}
-                </p>
-              </div>
-            </div>
-          </div>
-        </button>
-      )}
-
       <div className="flex gap-3">
         <button
           onClick={() => goTab("schedule")}
@@ -1898,7 +1887,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
         >
           <Plus size={16} color={T.gold} />
           <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
-            Add payment
+            Schedule payment
           </span>
         </button>
         <button
@@ -1908,7 +1897,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
         >
           <CheckSquare size={16} color={T.gold} />
           <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
-            {pendingTodos} to-dos
+            To-do list
           </span>
         </button>
         <button
@@ -1921,29 +1910,6 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
             Transactions
           </span>
         </button>
-      </div>
-
-      <div>
-        <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-2">
-          Recent activity
-        </p>
-        <div className="flex flex-col gap-2">
-          {recentPaid.map((p) => (
-            <div key={p.id} className="rounded-xl p-3 flex items-center justify-between" style={{ background: T.ink2 }}>
-              <div className="flex items-center gap-2.5">
-                <div className="rounded-full flex items-center justify-center" style={{ width: 22, height: 22, background: T.ok }}>
-                  <Check size={12} color={T.ink} />
-                </div>
-                <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm">
-                  {p.name}
-                </span>
-              </div>
-              <span style={{ fontFamily: FONT_MONO, color: T.muted }} className="text-xs">
-                {naira(p.amount)}
-              </span>
-            </div>
-          ))}
-        </div>
       </div>
 
       {historyOpen && (
@@ -1977,8 +1943,13 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
         />
       )}
       {walletHistoryOpen && (
-        <WalletHistorySheet transactions={walletTxns} onClose={() => setWalletHistoryOpen(false)} />
+        <WalletHistorySheet
+          transactions={walletTxns}
+          onClose={() => setWalletHistoryOpen(false)}
+          onSelect={(t) => setWalletReceiptFor(t)}
+        />
       )}
+      {walletReceiptFor && <WalletReceiptSheet txn={walletReceiptFor} onClose={() => setWalletReceiptFor(null)} />}
       {tapMode === "choose" && (
         <RotaTapChooser
           onSend={() => setTapMode("send")}
@@ -2010,7 +1981,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
 
 // Money in and money out, grouped by day — so "what did I do today" is the
 // first thing visible, with older days below rather than in a separate view.
-function WalletHistorySheet({ transactions, onClose }) {
+function WalletHistorySheet({ transactions, onClose, onSelect }) {
   const groups = [];
   for (const t of transactions) {
     const day = (t.created_at || "").slice(0, 10);
@@ -2066,7 +2037,12 @@ function WalletHistorySheet({ transactions, onClose }) {
                   </div>
                   <div className="flex flex-col gap-2">
                     {g.items.map((t) => (
-                      <div key={t.id} className="rounded-xl p-3 flex items-center justify-between" style={{ background: T.ink }}>
+                      <div
+                        key={t.id}
+                        onClick={() => onSelect?.(t)}
+                        className="rounded-xl p-3 flex items-center justify-between cursor-pointer"
+                        style={{ background: T.ink }}
+                      >
                         <div className="flex items-center gap-2.5 min-w-0">
                           <div
                             className="rounded-full flex items-center justify-center flex-shrink-0"
@@ -2180,6 +2156,10 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
   const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
   const totalPaid = payments.filter((p) => p.status === "paid").reduce((s, p) => s + p.amount, 0);
   const pct = totalBudgeted ? Math.min(100, Math.round((totalPaid / totalBudgeted) * 100)) : 0;
+  const recentPaid = payments
+    .filter((p) => p.status === "paid")
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 3);
 
   return (
     <div className="px-5 pb-4">
@@ -2209,6 +2189,36 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
           <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
             {pct}% of this month's schedule paid out
           </span>
+        </div>
+      )}
+
+      {recentPaid.length > 0 && (
+        <div className="mb-4">
+          <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-2">
+            Schedule activity
+          </p>
+          <div className="flex flex-col gap-2">
+            {recentPaid.map((p) => (
+              <div
+                key={p.id}
+                onClick={() => setDetailFor(p)}
+                className="rounded-xl p-3 flex items-center justify-between cursor-pointer"
+                style={{ background: T.ink2 }}
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="rounded-full flex items-center justify-center" style={{ width: 22, height: 22, background: T.ok }}>
+                    <Check size={12} color={T.ink} />
+                  </div>
+                  <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm">
+                    {p.name}
+                  </span>
+                </div>
+                <span style={{ fontFamily: FONT_MONO, color: T.muted }} className="text-xs">
+                  {naira(p.amount)}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -2735,7 +2745,7 @@ function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, totalBalance, 
       <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "85vh" }}>
         <div className="flex items-center justify-between mb-4">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
-            Add payment
+            Schedule payment
           </h3>
           <button onClick={onClose}>
             <X size={18} color={T.muted} />
@@ -3070,23 +3080,17 @@ function ReceiptSheet({ payment, senderName, onClose }) {
     ctx.fillRect(0, 0, W, 12);
 
     let y = 74;
-    ctx.fillStyle = "#2E2A22";
-    ctx.font = "600 32px Fredoka, sans-serif";
-    ctx.fillText("Rota", 48, y);
-
-    ctx.fillStyle = "#1FC28B";
-    ctx.beginPath();
-    ctx.arc(W - 48 - 14, y - 10, 15, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "#FBF8F2";
-    ctx.lineWidth = 3;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    ctx.moveTo(W - 48 - 20, y - 10);
-    ctx.lineTo(W - 48 - 15, y - 4);
-    ctx.lineTo(W - 48 - 7, y - 17);
-    ctx.stroke();
+    const logo = await loadLogoImage();
+    if (logo) {
+      ctx.drawImage(logo, 48, y - 38, 40, 40);
+      ctx.fillStyle = "#2E2A22";
+      ctx.font = "600 30px Fredoka, sans-serif";
+      ctx.fillText("rota", 48 + 40 + 14, y);
+    } else {
+      ctx.fillStyle = "#2E2A22";
+      ctx.font = "600 32px Fredoka, sans-serif";
+      ctx.fillText("rota", 48, y);
+    }
 
     y += 34;
     ctx.fillStyle = "#9C927F";
@@ -3210,6 +3214,192 @@ function ReceiptSheet({ payment, senderName, onClose }) {
               value={payment.paid_at ? new Date(payment.paid_at).toLocaleString("en-NG") : payment.date}
             />
             <ReceiptRow label="Reference" value={payment.transaction_ref || "—"} mono />
+          </div>
+        </div>
+
+        {imgError && (
+          <p className="text-xs mb-2 text-center" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+            {imgError}
+          </p>
+        )}
+        <button
+          onClick={shareImage}
+          disabled={shareState === "generating"}
+          className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 mb-2"
+          style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+        >
+          {shareState === "generating" ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />}
+          {shareState === "generating" ? "Preparing image..." : "Share as image"}
+        </button>
+        <button onClick={copyText} className="w-full text-center text-xs py-1" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+          {shareState === "copied" ? "Copied to clipboard" : "Copy as text instead"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Same branded, shareable receipt card as ReceiptSheet, but for a wallet
+// transaction (dva_wallet_transactions row) rather than a scheduled payment
+// — different shape, same visual design.
+function WalletReceiptSheet({ txn, onClose }) {
+  const [shareState, setShareState] = useState("idle");
+  const [imgError, setImgError] = useState("");
+  const isCredit = txn.type === "credit";
+
+  const rows = [
+    ["Amount", naira(txn.amount)],
+    [
+      isCredit ? "From" : "To",
+      txn.counterparty_name || (isCredit ? "Bank transfer" : "Recipient"),
+    ],
+    txn.counterparty_bank ? ["Bank", txn.counterparty_bank] : null,
+    txn.description ? ["Description", txn.description] : null,
+    ["Date", txn.created_at ? new Date(txn.created_at).toLocaleString("en-NG") : "—"],
+    ["Reference", txn.id ? String(txn.id).slice(0, 12) : "—"],
+  ].filter(Boolean);
+  const listRows = rows.filter(([label]) => label !== "Amount");
+
+  async function buildReceiptImage() {
+    await document.fonts.ready.catch(() => {});
+    const W = 720;
+    const rowH = 54;
+    const H = 400 + listRows.length * rowH;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+
+    ctx.fillStyle = "#FBF8F2";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#8B5CF6";
+    ctx.fillRect(0, 0, W, 12);
+
+    let y = 74;
+    const logo = await loadLogoImage();
+    if (logo) {
+      ctx.drawImage(logo, 48, y - 38, 40, 40);
+      ctx.fillStyle = "#2E2A22";
+      ctx.font = "600 30px Fredoka, sans-serif";
+      ctx.fillText("rota", 48 + 40 + 14, y);
+    } else {
+      ctx.fillStyle = "#2E2A22";
+      ctx.font = "600 32px Fredoka, sans-serif";
+      ctx.fillText("rota", 48, y);
+    }
+
+    y += 34;
+    ctx.fillStyle = "#9C927F";
+    ctx.font = "600 15px Nunito, sans-serif";
+    ctx.fillText(isCredit ? "MONEY RECEIVED" : "MONEY SENT", 48, y);
+
+    y += 72;
+    ctx.fillStyle = isCredit ? "#1FC28B" : "#2E2A22";
+    ctx.font = "600 50px 'IBM Plex Mono', monospace";
+    ctx.fillText(`${isCredit ? "+" : "-"}${naira(txn.amount)}`, 48, y);
+
+    y += 38;
+    ctx.strokeStyle = "#EDE4D3";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(48, y);
+    ctx.lineTo(W - 48, y);
+    ctx.stroke();
+
+    y += 44;
+    for (const [label, value] of listRows) {
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#9C927F";
+      ctx.font = "500 16px Nunito, sans-serif";
+      ctx.fillText(label, 48, y);
+
+      ctx.textAlign = "right";
+      ctx.fillStyle = "#2E2A22";
+      ctx.font = "600 16px Nunito, sans-serif";
+      ctx.fillText(String(value), W - 48, y);
+      y += rowH;
+    }
+    ctx.textAlign = "left";
+
+    y += 6;
+    ctx.strokeStyle = "#EDE4D3";
+    ctx.beginPath();
+    ctx.moveTo(48, y);
+    ctx.lineTo(W - 48, y);
+    ctx.stroke();
+
+    y += 42;
+    ctx.fillStyle = "#9C927F";
+    ctx.font = "italic 14px Nunito, sans-serif";
+    ctx.fillText("Money, on schedule. — Rota", 48, y);
+
+    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 0.95));
+  }
+
+  async function shareImage() {
+    setShareState("generating");
+    setImgError("");
+    try {
+      const blob = await buildReceiptImage();
+      if (!blob) throw new Error("Could not render image");
+      const file = new File([blob], `rota-receipt-${txn.id || Date.now()}.png`, { type: "image/png" });
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "Rota receipt" });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      }
+    } catch (e) {
+      if (e?.name !== "AbortError") setImgError("Couldn't generate the receipt image. Try again.");
+    } finally {
+      setShareState("idle");
+    }
+  }
+
+  async function copyText() {
+    const text = [`Rota ${isCredit ? "receipt (received)" : "receipt (sent)"}`, ...rows.map(([l, v]) => `${l}: ${v}`)].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setShareState("copied");
+      setTimeout(() => setShareState("idle"), 1500);
+    } catch {
+      // clipboard unavailable — no-op
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 25 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            Receipt
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+
+        <div className="rounded-2xl p-4 mb-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+          <div className="flex items-center gap-2 mb-3">
+            <div className="rounded-full flex items-center justify-center" style={{ width: 30, height: 30, background: T.ok }}>
+              {isCredit ? <ArrowDownLeft size={16} color={T.ink} /> : <ArrowUpRight size={16} color={T.ink} />}
+            </div>
+            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-medium">
+              {isCredit ? "Money received" : "Money sent"}
+            </span>
+          </div>
+          <div className="flex flex-col gap-2">
+            {rows.map(([label, value]) => (
+              <ReceiptRow key={label} label={label} value={value} mono={label === "Amount" || label === "Reference"} />
+            ))}
           </div>
         </div>
 
@@ -4956,7 +5146,7 @@ export default function RotaApp() {
             <div className="max-w-2xl mx-auto w-full">
               {tab === "home" && (
                 <PullToRefresh scrollRef={homeScrollRef} onRefresh={() => loadUserData(user)}>
-                  <HomeTab payments={payments} todos={todos} settings={settings} goTab={setTab} onUpdate={updateSettings} user={user} hasBiometricConfirm={hasBiometricConfirm} />
+                  <HomeTab payments={payments} settings={settings} goTab={setTab} onUpdate={updateSettings} user={user} hasBiometricConfirm={hasBiometricConfirm} />
                 </PullToRefresh>
               )}
               {tab === "schedule" && (
