@@ -3,11 +3,13 @@
     android:description="@string/servicedesc"
     android:requireDeviceScreenOn="false"
     android:requireDeviceUnlock="false">
-    <!-- Standard NFC Forum Type-4 NDEF application AID — using the
-         well-known AID (not an app-specific one) is what makes any
-         stock NFC reader on the other phone recognize this as a
-         readable NDEF tag, no Rota app needed on their end. -->
+    <!-- Rota-private AID (F0 = proprietary prefix, 524F5441 = "ROTA")
+         instead of the standard/shared NDEF AID — avoids the OS picker
+         that appears when another installed app (e.g. X) also registers
+         for the standard AID. Trade-off: only phones with Rota's own
+         reader-mode listener (RotaNfcReaderPlugin) running will react to
+         a tap; a phone without Rota installed no longer gets any prompt. -->
     <aid-group android:description="@string/aiddescription" android:category="other">
-        <aid-filter android:name="D2760000850101" />
+        <aid-filter android:name="F0524F5441" />
     </aid-group>
 </host-apdu-service>

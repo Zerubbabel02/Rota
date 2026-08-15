@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient.js";
 import { startRegistration, startAuthentication, browserSupportsWebAuthn } from "@simplewebauthn/browser";
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, registerPlugin } from "@capacitor/core";
 import { NativeBiometric } from "capacitor-native-biometric";
 import { HCECapacitorPlugin } from "capacitor-hce-plugin";
 import { App as CapacitorApp } from "@capacitor/app";
@@ -92,6 +92,9 @@ function applyTheme(isDark) {
 const NATIVE_BIO_SERVER = "rota-native-biometric";
 const NATIVE_BIO_FLAG_KEY = "rota_native_bio_enrolled";
 const IS_NATIVE = Capacitor.isNativePlatform();
+// Native-only local plugin (android/app/.../RotaNfcReaderPlugin.kt) — the
+// "listen for a tap" half capacitor-hce-plugin doesn't provide.
+const RotaNfcReader = registerPlugin("RotaNfcReader");
 
 const FONT_DISPLAY = "'Fredoka', 'Baloo 2', system-ui, sans-serif";
 const FONT_BODY = "'Nunito', system-ui, -apple-system, sans-serif";
@@ -1233,6 +1236,9 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
     // prompt, no app required on their end. QR still works either way.
     let hceListener = null;
     if (IS_NATIVE) {
+      // This device can't be a reader and a card at the same time —
+      // pause our own tap-listening while we're the one being tapped.
+      RotaNfcReader.stopListening().catch(() => {});
       HCECapacitorPlugin.isNfcHceSupported()
         .then(({ supported }) => {
           if (!supported) {
@@ -1259,6 +1265,7 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
       clearInterval(pollRef.current);
       if (IS_NATIVE) {
         HCECapacitorPlugin.stopNfcHce().catch(() => {});
+        RotaNfcReader.startListening().catch(() => {});
         hceListener?.remove();
       }
     };
@@ -4519,6 +4526,26 @@ export default function RotaApp() {
       }
     });
     return () => {
+      sub.then((handle) => handle.remove());
+    };
+  }, []);
+
+  // Listens for a real NFC tap the whole time the app is open (paused only
+  // while this same device is mid-emulation as the sender — see
+  // TapSendSheet). Fully in-app: no OS tag-dispatch, no picker, no browser.
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    RotaNfcReader.startListening().catch(() => {});
+    const sub = RotaNfcReader.addListener("tapReceived", ({ url }) => {
+      try {
+        const token = new URL(url).searchParams.get("tap");
+        if (token) setTapClaimToken(token);
+      } catch {
+        // not a URL we care about
+      }
+    });
+    return () => {
+      RotaNfcReader.stopListening().catch(() => {});
       sub.then((handle) => handle.remove());
     };
   }, []);
