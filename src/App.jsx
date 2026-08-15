@@ -1662,9 +1662,6 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
   const [walletHistoryOpen, setWalletHistoryOpen] = useState(false);
   const [balanceHidden, setBalanceHidden] = useState(false);
 
-  const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
-  const totalPaid = payments.filter((p) => p.status === "paid").reduce((s, p) => s + p.amount, 0);
-  const pct = totalBudgeted ? Math.min(100, Math.round((totalPaid / totalBudgeted) * 100)) : 0;
   const upcoming = payments.filter((p) => p.status === "upcoming").sort((a, b) => a.date.localeCompare(b.date));
   const next = upcoming[0];
   const pendingTodos = todos.filter((t) => !t.done).length;
@@ -1861,23 +1858,6 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometri
           </div>
         </div>
       )}
-
-      <div className="rounded-2xl p-4" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-        <div className="flex justify-between items-baseline mb-3">
-          <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-            This month
-          </span>
-          <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-xs">
-            {naira(totalPaid)} / {naira(totalBudgeted)}
-          </span>
-        </div>
-        <div className="rounded-full overflow-hidden mb-1" style={{ height: 8, background: T.ink3 }}>
-          <div className="h-full rounded-full" style={{ width: `${pct}%`, background: T.gold }} />
-        </div>
-        <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-          {pct}% of this month's schedule paid out
-        </span>
-      </div>
 
       {next && (
         <button
@@ -2190,6 +2170,9 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
   const [detailEditIntent, setDetailEditIntent] = useState(false);
   const sorted = [...payments].sort((a, b) => a.date.localeCompare(b.date));
   const today = todayISO();
+  const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
+  const totalPaid = payments.filter((p) => p.status === "paid").reduce((s, p) => s + p.amount, 0);
+  const pct = totalBudgeted ? Math.min(100, Math.round((totalPaid / totalBudgeted) * 100)) : 0;
 
   return (
     <div className="px-5 pb-4">
@@ -2202,6 +2185,25 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
           <Plus size={19} color={T.ink2} />
         </button>
       </div>
+
+      {payments.length > 0 && (
+        <div className="rounded-2xl p-4 mb-4" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+          <div className="flex justify-between items-baseline mb-3">
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              This month
+            </span>
+            <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-xs">
+              {naira(totalPaid)} / {naira(totalBudgeted)}
+            </span>
+          </div>
+          <div className="rounded-full overflow-hidden mb-1" style={{ height: 8, background: T.ink3 }}>
+            <div className="h-full rounded-full" style={{ width: `${pct}%`, background: T.gold }} />
+          </div>
+          <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+            {pct}% of this month's schedule paid out
+          </span>
+        </div>
+      )}
 
       {sorted.length === 0 && (
         <p className="text-sm text-center py-10" style={{ color: T.muted, fontFamily: FONT_BODY }}>
