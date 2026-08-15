@@ -1,0 +1,9 @@
+{
+  "appId": "com.rota.app",
+  "appName": "Rota",
+  "webDir": "dist",
+  "server": {
+    "hostname": "rota-app-zerubbabel1.vercel.app",
+    "androidScheme": "https"
+  }
+}
