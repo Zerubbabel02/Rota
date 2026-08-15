@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient.js";
 import { startRegistration, startAuthentication, browserSupportsWebAuthn } from "@simplewebauthn/browser";
+import { Capacitor } from "@capacitor/core";
+import { NativeBiometric } from "capacitor-native-biometric";
+import { HCECapacitorPlugin } from "capacitor-hce-plugin";
+import { App as CapacitorApp } from "@capacitor/app";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
+import RotaMark from "./components/RotaMark.jsx";
 import {
   Home as HomeIcon,
   Calendar,
@@ -78,6 +83,15 @@ let T = { ...PALETTES.light };
 function applyTheme(isDark) {
   Object.assign(T, isDark ? PALETTES.dark : PALETTES.light);
 }
+
+// The wrapped Android app's WebView has no navigator.credentials, so
+// WebAuthn (used on the website) can't work there. Native biometric confirm
+// instead unlocks an opaque server-issued secret stored behind Android
+// Keystore + BiometricPrompt (capacitor-native-biometric) — same
+// hash-only-on-server model as the transaction PIN.
+const NATIVE_BIO_SERVER = "rota-native-biometric";
+const NATIVE_BIO_FLAG_KEY = "rota_native_bio_enrolled";
+const IS_NATIVE = Capacitor.isNativePlatform();
 
 const FONT_DISPLAY = "'Fredoka', 'Baloo 2', system-ui, sans-serif";
 const FONT_BODY = "'Nunito', system-ui, -apple-system, sans-serif";
@@ -456,12 +470,7 @@ function SideNav({ tab, setTab }) {
       style={{ width: 220, background: T.ink2, borderRight: `1px solid ${T.ink3}`, padding: "24px 12px" }}
     >
       <div className="flex items-center gap-2 px-2 mb-8">
-        <div
-          className="rounded-full flex items-center justify-center flex-shrink-0"
-          style={{ width: 30, height: 30, background: T.gold }}
-        >
-          <Wallet size={15} color={T.ink} />
-        </div>
+        <RotaMark size={30} />
         <span style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-base font-semibold">
           Rota
         </span>
@@ -1176,6 +1185,7 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
   const [submitting, setSubmitting] = useState(false);
   const [transfer, setTransfer] = useState(null); // { id, token, claimUrl }
   const [claimedBy, setClaimedBy] = useState(null); // { name, avatarUrl }
+  const [hceStatus, setHceStatus] = useState(null); // null | "unsupported" | "active" | "tapped"
   const canvasRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -1217,7 +1227,41 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
         setStep("claimed");
       }
     }, 2500);
-    return () => clearInterval(pollRef.current);
+
+    // Emulate the same claim URL as an NFC tag, alongside the QR code —
+    // any phone that taps ours gets the normal "open this link?" system
+    // prompt, no app required on their end. QR still works either way.
+    let hceListener = null;
+    if (IS_NATIVE) {
+      HCECapacitorPlugin.isNfcHceSupported()
+        .then(({ supported }) => {
+          if (!supported) {
+            setHceStatus("unsupported");
+            return;
+          }
+          return HCECapacitorPlugin.startNfcHce({
+            content: transfer.claimUrl,
+            mimeType: "RTD_URI",
+            persistMessage: false,
+          }).then(() => setHceStatus("active"));
+        })
+        .catch(() => setHceStatus("unsupported"));
+
+      HCECapacitorPlugin.addListener("onStatusChanged", ({ eventName }) => {
+        if (eventName === "scan-completed") setHceStatus("tapped");
+        else if (eventName === "card-emulator-started") setHceStatus("active");
+      }).then((handle) => {
+        hceListener = handle;
+      });
+    }
+
+    return () => {
+      clearInterval(pollRef.current);
+      if (IS_NATIVE) {
+        HCECapacitorPlugin.stopNfcHce().catch(() => {});
+        hceListener?.remove();
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, transfer]);
 
@@ -1292,9 +1336,16 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
             <div className="rounded-2xl p-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
               <canvas ref={canvasRef} />
             </div>
-            <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
-              Have them scan this with their camera — works on any phone or laptop. Link expires in 10 minutes.
-            </p>
+            {hceStatus === "active" || hceStatus === "tapped" ? (
+              <p className="text-xs flex items-center gap-1.5 justify-center" style={{ color: T.ok, fontFamily: FONT_BODY }}>
+                <Wifi size={13} style={{ transform: "rotate(90deg)" }} />
+                {hceStatus === "tapped" ? "Tapped! Waiting for them to accept…" : "Hold the backs of your phones together, or have them scan the QR code."}
+              </p>
+            ) : (
+              <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                Have them scan this with their camera — works on any phone or laptop. Link expires in 10 minutes.
+              </p>
+            )}
             <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
               <Loader2 size={11} className="animate-spin" /> Waiting for them to accept…
             </p>
@@ -1333,7 +1384,8 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
           title="Confirm Rota Tap"
           actionLabel="Confirm with PIN"
           hasBiometric={hasBiometric}
-          onClose={() => setStep("amount")}
+          onBack={() => setStep("amount")}
+          onClose={onClose}
           onConfirmed={() => {
             createTransfer();
           }}
@@ -1459,12 +1511,7 @@ function WelcomeScreen({ onNext }) {
     <div className="h-full flex flex-col justify-between px-7" style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}>
       <div>
         <div className="flex items-center gap-2">
-          <div
-            className="rounded-full flex items-center justify-center"
-            style={{ width: 34, height: 34, background: T.gold }}
-          >
-            <Wallet size={17} color={T.ink} />
-          </div>
+          <RotaMark size={34} />
           <span style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
             Rota
           </span>
@@ -1604,7 +1651,7 @@ function LinkScreen({ email, onLinked, onSkip }) {
 }
 
 /* ---------- Home tab ---------- */
-function HomeTab({ payments, todos, settings, goTab, onUpdate, user }) {
+function HomeTab({ payments, todos, settings, goTab, onUpdate, user, hasBiometricConfirm }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [walletLoading, setWalletLoading] = useState(true);
@@ -1934,7 +1981,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user }) {
         <SendMoneySheet
           wallet={wallet}
           hasPin={settings.hasPin}
-          hasBiometric={settings.biometricRegistered}
+          hasBiometric={hasBiometricConfirm}
           onClose={() => setSendMoneyOpen(false)}
           onSent={(newBalance) => {
             refreshWalletBalance(newBalance);
@@ -1956,7 +2003,7 @@ function HomeTab({ payments, todos, settings, goTab, onUpdate, user }) {
         <TapSendSheet
           wallet={wallet}
           hasPin={settings.hasPin}
-          hasBiometric={settings.biometricRegistered}
+          hasBiometric={hasBiometricConfirm}
           onBack={() => setTapMode("choose")}
           onClose={() => setTapMode(null)}
           onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
@@ -3412,7 +3459,7 @@ function AdvisorTab() {
 }
 
 /* ---------- Profile tab ---------- */
-function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadAvatar, onBiometricChange, email, onCardLinked }) {
+function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadAvatar, onBiometricChange, hasBiometricConfirm, email, onCardLinked }) {
   const [editingName, setEditingName] = useState(false);
   const [name, setName] = useState(settings.name);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
@@ -3429,6 +3476,15 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
     setBioBusy(true);
     setBioError("");
     try {
+      if (IS_NATIVE) {
+        const avail = await NativeBiometric.isAvailable();
+        if (!avail.isAvailable) throw new Error("No fingerprint/face unlock is set up on this device yet — add one in your phone's settings first.");
+        const { data, error: enrollErr } = await supabase.functions.invoke("native-biometric-enroll", { body: {} });
+        if (enrollErr || !data?.success) throw new Error((data && data.error) || "Couldn't enable biometrics.");
+        await NativeBiometric.setCredentials({ username: "rota", password: data.secret, server: NATIVE_BIO_SERVER });
+        onBiometricChange(true);
+        return;
+      }
       if (!browserSupportsWebAuthn()) throw new Error("This browser doesn't support biometric sign-in.");
       const { data: options, error: optErr } = await supabase.functions.invoke("webauthn-register-options", { body: {} });
       if (optErr || options?.error) throw new Error((options && options.error) || "Couldn't start registration.");
@@ -3437,7 +3493,8 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
       if (verErr || !data?.success) throw new Error((data && data.error) || "Couldn't verify that device.");
       onBiometricChange(true);
     } catch (e) {
-      if (e?.name !== "NotAllowedError") setBioError(e.message || "Couldn't enable biometrics.");
+      const cancelled = e?.name === "NotAllowedError" || String(e?.message || "").toLowerCase().includes("cancel");
+      if (!cancelled) setBioError(e.message || "Couldn't enable biometrics.");
     } finally {
       setBioBusy(false);
     }
@@ -3446,6 +3503,21 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
   async function disableBiometric() {
     setBioBusy(true);
     setBioError("");
+    if (IS_NATIVE) {
+      try {
+        await NativeBiometric.deleteCredentials({ server: NATIVE_BIO_SERVER });
+      } catch {
+        // no stored credential to delete — fine, still clear server-side below
+      }
+      const { data, error } = await supabase.functions.invoke("native-biometric-unenroll", { body: {} });
+      setBioBusy(false);
+      if (error || !data?.success) {
+        setBioError("Couldn't remove biometrics.");
+        return;
+      }
+      onBiometricChange(false);
+      return;
+    }
     const { data, error } = await supabase.functions.invoke("webauthn-unregister", { body: {} });
     setBioBusy(false);
     if (error || !data?.success) {
@@ -3602,14 +3674,18 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
         <Row icon={Fingerprint} label="Biometric confirm">
           {bioBusy ? (
             <Loader2 size={14} className="animate-spin" color={T.muted} />
-          ) : settings.biometricRegistered ? (
+          ) : hasBiometricConfirm ? (
             <button onClick={disableBiometric} className="text-xs font-medium" style={{ color: T.warn, fontFamily: FONT_BODY }}>
               Remove
             </button>
-          ) : (
+          ) : IS_NATIVE || browserSupportsWebAuthn() ? (
             <button onClick={enableBiometric} className="text-xs font-medium" style={{ color: T.gold, fontFamily: FONT_BODY }}>
               Enable
             </button>
+          ) : (
+            <span className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              Not available in app
+            </span>
           )}
         </Row>
         <Row icon={Wallet} label="Currency">
@@ -3654,7 +3730,7 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
         <CardDetailSheet
           last4={settings.cardLast4}
           hasPin={settings.hasPin}
-          hasBiometric={settings.biometricRegistered}
+          hasBiometric={hasBiometricConfirm}
           onClose={() => setCardSheetOpen(false)}
           onChangeCard={() => {
             setCardSheetOpen(false);
@@ -3853,7 +3929,7 @@ function PinSheet({ hasPin, onClose, onDone }) {
   );
 }
 
-function ConfirmSheet({ hasBiometric, onClose, onConfirmed, title = "Confirm to schedule", actionLabel = "Confirm with PIN" }) {
+function ConfirmSheet({ hasBiometric, onBack, onClose, onConfirmed, title = "Confirm to schedule", actionLabel = "Confirm with PIN" }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -3863,6 +3939,14 @@ function ConfirmSheet({ hasBiometric, onClose, onConfirmed, title = "Confirm to 
     setError("");
     setSubmitting(true);
     try {
+      if (IS_NATIVE) {
+        await NativeBiometric.verifyIdentity({ title: "Confirm it's you", reason: "Confirm this transaction" });
+        const creds = await NativeBiometric.getCredentials({ server: NATIVE_BIO_SERVER });
+        const { data, error: verErr } = await supabase.functions.invoke("native-biometric-verify", { body: { secret: creds.password } });
+        if (verErr || !data?.success) throw new Error((data && data.error) || "Couldn't verify.");
+        onConfirmed();
+        return;
+      }
       if (!browserSupportsWebAuthn()) throw new Error("This browser doesn't support biometrics — use your PIN.");
       const { data: options, error: optErr } = await supabase.functions.invoke("webauthn-auth-options", { body: {} });
       if (optErr || options?.error) throw new Error((options && options.error) || "Biometrics unavailable.");
@@ -3871,7 +3955,8 @@ function ConfirmSheet({ hasBiometric, onClose, onConfirmed, title = "Confirm to 
       if (verErr || !data?.success) throw new Error((data && data.error) || "Couldn't verify.");
       onConfirmed();
     } catch (e) {
-      if (e?.name !== "NotAllowedError") setError(e.message || "Couldn't verify — use your PIN instead.");
+      const cancelled = e?.name === "NotAllowedError" || String(e?.message || "").toLowerCase().includes("cancel");
+      if (!cancelled) setError(e.message || "Couldn't verify — use your PIN instead.");
     } finally {
       setSubmitting(false);
     }
@@ -3898,8 +3983,13 @@ function ConfirmSheet({ hasBiometric, onClose, onConfirmed, title = "Confirm to 
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 24, paddingBottom: kbInset }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
       <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+        <div className="flex items-center gap-2 mb-4">
+          {onBack && (
+            <button onClick={onBack} className="flex-shrink-0">
+              <ChevronDown size={18} color={T.muted} style={{ transform: "rotate(90deg)" }} />
+            </button>
+          )}
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold flex-1">
             {title}
           </h3>
           <button onClick={onClose}>
@@ -4063,7 +4153,7 @@ function Toggle({ value, onChange }) {
 
 /* ---------- Auth ---------- */
 function AuthScreen() {
-  const [mode, setMode] = useState("signup");
+  const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -4149,10 +4239,15 @@ function AuthScreen() {
           setError("");
           setCheckEmail(false);
         }}
-        className="w-full text-center text-xs mt-5"
-        style={{ color: T.muted, fontFamily: FONT_BODY }}
+        className="w-full text-center mt-6"
+        style={{ fontFamily: FONT_BODY }}
       >
-        {mode === "signup" ? "Already have an account? Log in" : "New here? Sign up"}
+        <span className="text-sm" style={{ color: T.muted }}>
+          {mode === "signup" ? "Already have an account? " : "Don't have an account? "}
+        </span>
+        <span className="text-sm font-bold" style={{ color: T.ok }}>
+          {mode === "signup" ? "Log in" : "Tap here to sign up"}
+        </span>
       </button>
     </div>
   );
@@ -4303,6 +4398,94 @@ function TapClaimScreen({ token, user, onDone }) {
   );
 }
 
+// Swipe-down-to-refresh for a scrollable container. Tracks the drag with
+// refs (not state) so the touchmove listener never needs re-binding
+// mid-gesture — only the visible pull distance goes through setState, to
+// drive the indicator's height/rotation each frame.
+function PullToRefresh({ scrollRef, onRefresh, children }) {
+  const [pull, setPull] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const dragging = useRef(false);
+  const startY = useRef(null);
+  const pullRef = useRef(0);
+  const refreshingRef = useRef(false);
+  const THRESHOLD = 64;
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    function onTouchStart(e) {
+      if (el.scrollTop <= 0 && !refreshingRef.current) {
+        startY.current = e.touches[0].clientY;
+        dragging.current = true;
+      }
+    }
+    function onTouchMove(e) {
+      if (!dragging.current || startY.current == null) return;
+      const delta = e.touches[0].clientY - startY.current;
+      if (delta <= 0 || el.scrollTop > 0) {
+        dragging.current = false;
+        pullRef.current = 0;
+        setPull(0);
+        return;
+      }
+      e.preventDefault();
+      const next = Math.min(delta * 0.5, THRESHOLD * 1.4);
+      pullRef.current = next;
+      setPull(next);
+    }
+    async function onTouchEnd() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      startY.current = null;
+      if (pullRef.current >= THRESHOLD) {
+        refreshingRef.current = true;
+        setRefreshing(true);
+        setPull(THRESHOLD);
+        try {
+          await onRefresh();
+        } finally {
+          refreshingRef.current = false;
+          setRefreshing(false);
+          pullRef.current = 0;
+          setPull(0);
+        }
+      } else {
+        pullRef.current = 0;
+        setPull(0);
+      }
+    }
+
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    el.addEventListener("touchend", onTouchEnd, { passive: true });
+    return () => {
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [scrollRef, onRefresh]);
+
+  const height = refreshing ? THRESHOLD : pull;
+  return (
+    <>
+      <div
+        className="flex items-center justify-center overflow-hidden"
+        style={{ height, transition: dragging.current ? "none" : "height 200ms ease" }}
+      >
+        <RotateCcw
+          size={18}
+          color={T.muted}
+          className={refreshing ? "animate-spin" : ""}
+          style={refreshing ? undefined : { transform: `rotate(${pull * 3}deg)`, opacity: Math.min(pull / THRESHOLD, 1) }}
+        />
+      </div>
+      {children}
+    </>
+  );
+}
+
 /* ---------- Root ---------- */
 export default function RotaApp() {
   const [authLoading, setAuthLoading] = useState(true);
@@ -4312,7 +4495,41 @@ export default function RotaApp() {
   const [payments, setPayments] = useState([]);
   const [todos, setTodos] = useState([]);
   const [settings, setSettings] = useState(defaultSettings());
+  // Native enrollment is device-local (Keystore-bound), unlike WebAuthn's
+  // account-level registration — tracked separately so switching devices
+  // doesn't inherit a stale "enrolled" state from one that never enrolled.
+  const [nativeBioEnrolled, setNativeBioEnrolled] = useState(() => IS_NATIVE && localStorage.getItem(NATIVE_BIO_FLAG_KEY) === "1");
+  const hasBiometricConfirm = IS_NATIVE ? nativeBioEnrolled : settings.biometricRegistered;
   const [tapClaimToken, setTapClaimToken] = useState(() => new URLSearchParams(window.location.search).get("tap"));
+  const homeScrollRef = useRef(null);
+
+  // App Links land here instead of a fresh page load, so pick the token
+  // out of the launch URL by hand and feed it into the same state the
+  // ?tap= query-param path already uses — no separate claim UI needed.
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    const sub = CapacitorApp.addListener("appUrlOpen", ({ url }) => {
+      try {
+        const token = new URL(url).searchParams.get("tap");
+        if (token) setTapClaimToken(token);
+      } catch {
+        // not a URL we care about
+      }
+    });
+    return () => {
+      sub.then((handle) => handle.remove());
+    };
+  }, []);
+
+  const setBiometricConfirm = useCallback((v) => {
+    if (IS_NATIVE) {
+      setNativeBioEnrolled(v);
+      if (v) localStorage.setItem(NATIVE_BIO_FLAG_KEY, "1");
+      else localStorage.removeItem(NATIVE_BIO_FLAG_KEY);
+    } else {
+      setSettings((prev) => ({ ...prev, biometricRegistered: v }));
+    }
+  }, []);
 
   const loadUserData = useCallback(async (authUser) => {
     const [{ data: profileRow }, { data: paymentRows }, { data: todoRows }] = await Promise.all([
@@ -4706,9 +4923,13 @@ export default function RotaApp() {
             avatarUrl={settings.avatarUrl}
             name={settings.name}
           />
-          <div className="flex-1 overflow-y-auto rota-scroll-pad">
+          <div className="flex-1 overflow-y-auto rota-scroll-pad" ref={homeScrollRef}>
             <div className="max-w-2xl mx-auto w-full">
-              {tab === "home" && <HomeTab payments={payments} todos={todos} settings={settings} goTab={setTab} onUpdate={updateSettings} user={user} />}
+              {tab === "home" && (
+                <PullToRefresh scrollRef={homeScrollRef} onRefresh={() => loadUserData(user)}>
+                  <HomeTab payments={payments} todos={todos} settings={settings} goTab={setTab} onUpdate={updateSettings} user={user} hasBiometricConfirm={hasBiometricConfirm} />
+                </PullToRefresh>
+              )}
               {tab === "schedule" && (
                 <ScheduleTab
                   payments={payments}
@@ -4720,7 +4941,7 @@ export default function RotaApp() {
                   onRetry={retryPayment}
                   senderName={settings.name}
                   hasPin={settings.hasPin}
-                  hasBiometric={settings.biometricRegistered}
+                  hasBiometric={hasBiometricConfirm}
                   totalBalance={settings.totalBalance}
                 />
               )}
@@ -4734,7 +4955,8 @@ export default function RotaApp() {
                   onReset={handleReset}
                   onUnlink={handleUnlink}
                   onUploadAvatar={uploadAvatar}
-                  onBiometricChange={(v) => setSettings((prev) => ({ ...prev, biometricRegistered: v }))}
+                  onBiometricChange={setBiometricConfirm}
+                  hasBiometricConfirm={hasBiometricConfirm}
                   email={user?.email}
                   onCardLinked={handleCardLinkedFromProfile}
                 />
