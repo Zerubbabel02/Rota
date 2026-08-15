@@ -1,4 +1,9 @@
 ext {
+    // Matches the kotlin-gradle-plugin classpath already declared in the
+    // root build.gradle — plugins that check hasProperty('kotlin_version')
+    // (e.g. @capacitor/local-notifications) fall back to their own,
+    // different pinned version otherwise, forcing a redundant download.
+    kotlin_version = '2.0.20'
     minSdkVersion = 24
     compileSdkVersion = 36
     targetSdkVersion = 36

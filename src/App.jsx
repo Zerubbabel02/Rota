@@ -6,6 +6,7 @@ import { NativeBiometric } from "capacitor-native-biometric";
 import { HCECapacitorPlugin } from "capacitor-hce-plugin";
 import { App as CapacitorApp } from "@capacitor/app";
 import { PushNotifications } from "@capacitor/push-notifications";
+import { LocalNotifications } from "@capacitor/local-notifications";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import RotaMark from "./components/RotaMark.jsx";
@@ -4770,9 +4771,32 @@ export default function RotaApp() {
       errListener = handle;
     });
 
+    // Android only auto-shows a push as a system notification when the app
+    // is backgrounded/closed — while it's open, the OS just hands it to us
+    // as a JS event instead, so without this, an in-app push is silently
+    // dropped with nothing visible at all.
+    let receivedListener = null;
+    LocalNotifications.requestPermissions().catch(() => {});
+    PushNotifications.addListener("pushNotificationReceived", (notification) => {
+      LocalNotifications.schedule({
+        notifications: [
+          {
+            id: Date.now() % 2147483647,
+            title: notification.title || "Rota",
+            body: notification.body || "",
+            smallIcon: "ic_stat_rota",
+            iconColor: "#0B1120",
+          },
+        ],
+      }).catch(() => {});
+    }).then((handle) => {
+      receivedListener = handle;
+    });
+
     return () => {
       regListener?.remove();
       errListener?.remove();
+      receivedListener?.remove();
     };
   }, [user?.id]);
 
