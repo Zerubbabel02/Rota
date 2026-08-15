@@ -5,6 +5,7 @@ import { Capacitor, registerPlugin } from "@capacitor/core";
 import { NativeBiometric } from "capacitor-native-biometric";
 import { HCECapacitorPlugin } from "capacitor-hce-plugin";
 import { App as CapacitorApp } from "@capacitor/app";
+import { PushNotifications } from "@capacitor/push-notifications";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import RotaMark from "./components/RotaMark.jsx";
@@ -4739,6 +4740,41 @@ export default function RotaApp() {
       sub.then((handle) => handle.remove());
     };
   }, []);
+
+  // Registers this device for push notifications once signed in, so a
+  // server-side function can notify this phone about a transaction even
+  // while the app is closed. Re-registering on every sign-in is cheap and
+  // keeps the stored token fresh if it ever rotates.
+  useEffect(() => {
+    if (!IS_NATIVE || !user) return;
+    let regListener = null;
+    let errListener = null;
+
+    PushNotifications.requestPermissions().then(({ receive }) => {
+      if (receive !== "granted") return;
+      PushNotifications.register();
+    });
+
+    PushNotifications.addListener("registration", (token) => {
+      supabase
+        .from("device_push_tokens")
+        .upsert({ user_id: user.id, token: token.value, platform: "android" }, { onConflict: "token" })
+        .then(() => {});
+    }).then((handle) => {
+      regListener = handle;
+    });
+
+    PushNotifications.addListener("registrationError", (err) => {
+      console.error("Push registration failed", err);
+    }).then((handle) => {
+      errListener = handle;
+    });
+
+    return () => {
+      regListener?.remove();
+      errListener?.remove();
+    };
+  }, [user?.id]);
 
   const setBiometricConfirm = useCallback((v) => {
     if (IS_NATIVE) {

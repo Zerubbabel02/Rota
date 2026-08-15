@@ -47,6 +47,16 @@
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
 
+        <!-- FCM notifications default to a generic bell icon and system
+             accent color unless told otherwise — this uses our own mark
+             and brand color instead. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_stat_rota" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/ic_launcher_background" />
+
         <!-- Emulates a standard NFC Type-4 NDEF tag while active, so any
              phone tapping ours (no app required on their end) gets the
              normal "open this link?" system prompt, same as tapping a
@@ -76,4 +86,5 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>
