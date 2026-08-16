@@ -3738,7 +3738,7 @@ function TapReceiveModeSheet({ value, onSelect, onClose }) {
       <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <div className="flex items-center justify-between mb-1">
           <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
-            Rota Tap alerts
+            Rota Tap: Alerts
           </h3>
           <button onClick={onClose}>
             <X size={18} color={T.muted} />
@@ -4018,7 +4018,7 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
         </Row>
         {IS_NATIVE && (
           <button onClick={() => setTapModeSheetOpen(true)} className="w-full text-left">
-            <Row icon={Wifi} label="Rota Tap alerts">
+            <Row icon={Wifi} label="Rota Tap: Alerts">
               <span className="flex items-center gap-1.5">
                 <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
                   {TAP_RECEIVE_MODE_LABELS[settings.tapReceiveMode] || TAP_RECEIVE_MODE_LABELS.quick_accept}
