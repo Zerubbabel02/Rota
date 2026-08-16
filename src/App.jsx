@@ -416,7 +416,10 @@ function QrScanner({ onResult, onCancel }) {
 /* ---------- Shared bits ---------- */
 function AppHeader({ title, onProfile, avatarUrl, name }) {
   return (
-    <div className="rota-header-safe flex items-center justify-between px-5 pb-3">
+    <div
+      className="rota-header-safe rota-header-glass flex items-center justify-between px-5 pb-3"
+      style={{ background: `${T.ink}B8`, backdropFilter: "blur(20px) saturate(1.5)", WebkitBackdropFilter: "blur(20px) saturate(1.5)" }}
+    >
       <h1 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold">
         {title}
       </h1>
@@ -2153,6 +2156,7 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
   const [receiptFor, setReceiptFor] = useState(null);
   const [detailFor, setDetailFor] = useState(null);
   const [detailEditIntent, setDetailEditIntent] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const sorted = [...payments].sort((a, b) => a.date.localeCompare(b.date));
   const today = todayISO();
   const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
@@ -2161,7 +2165,7 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
   const recentPaid = payments
     .filter((p) => p.status === "paid")
     .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 3);
+    .slice(0, 2);
 
   return (
     <div className="px-5 pb-4">
@@ -2177,28 +2181,50 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
 
       {payments.length > 0 && (
         <div className="rounded-2xl p-4 mb-4" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-          <div className="flex justify-between items-baseline mb-3">
-            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-              This month
-            </span>
-            <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-xs">
-              {naira(totalPaid)} / {naira(totalBudgeted)}
-            </span>
+          <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-3">
+            This month
+          </p>
+          <div className="flex items-end justify-between mb-3">
+            <div>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-0.5">
+                Spent so far
+              </p>
+              <span style={{ fontFamily: FONT_MONO, color: T.ok }} className="text-lg font-semibold">
+                {naira(totalPaid)}
+              </span>
+            </div>
+            <div className="text-right">
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-0.5">
+                Total budget
+              </p>
+              <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-lg font-semibold">
+                {naira(totalBudgeted)}
+              </span>
+            </div>
           </div>
           <div className="rounded-full overflow-hidden mb-1" style={{ height: 8, background: T.ink3 }}>
             <div className="h-full rounded-full" style={{ width: `${pct}%`, background: T.gold }} />
           </div>
           <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-            {pct}% of this month's schedule paid out
+            {pct}% paid out — {naira(Math.max(0, totalBudgeted - totalPaid))} left to go
           </span>
         </div>
       )}
 
       {recentPaid.length > 0 && (
         <div className="mb-4">
-          <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-2">
-            Schedule activity
-          </p>
+          <div className="flex items-center justify-between mb-2">
+            <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              Schedule activity
+            </p>
+            <button
+              onClick={() => setHistoryOpen(true)}
+              className="text-xs font-medium"
+              style={{ color: T.gold, fontFamily: FONT_BODY }}
+            >
+              See all
+            </button>
+          </div>
           <div className="flex flex-col gap-2">
             {recentPaid.map((p) => (
               <div
@@ -2375,6 +2401,9 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
         />
       )}
       {receiptFor && <ReceiptSheet payment={receiptFor} senderName={senderName} onClose={() => setReceiptFor(null)} />}
+      {historyOpen && (
+        <TransactionHistorySheet payments={payments} senderName={senderName} onClose={() => setHistoryOpen(false)} />
+      )}
       {detailFor && (
         <ScheduleDetailSheet
           payment={detailFor}
@@ -4785,6 +4814,7 @@ export default function RotaApp() {
             title: notification.title || "Rota",
             body: notification.body || "",
             smallIcon: "ic_stat_rota",
+            largeIcon: "ic_rota_large",
             iconColor: "#0B1120",
           },
         ],
@@ -5130,6 +5160,15 @@ export default function RotaApp() {
     .rota-header-safe {
       padding-top: max(24px, env(safe-area-inset-top));
     }
+    /* Sticks to the top of the scroll container it lives in (not the
+       viewport) so tab content scrolls up and passes visibly behind its
+       blur, iOS-style, instead of the header just sitting in normal flow
+       and pushing content down. */
+    .rota-header-glass {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
   `;
 
   if (tapClaimToken) {
@@ -5196,13 +5235,13 @@ export default function RotaApp() {
       <div className="rota-shell-app w-full flex overflow-hidden">
         <SideNav tab={tab} setTab={setTab} />
         <div className="relative flex-1 flex flex-col min-w-0">
-          <AppHeader
-            title={{ home: "Rota", schedule: "Schedule", todo: "To-Do", advisor: "Advisor", profile: "Profile" }[tab]}
-            onProfile={tab !== "profile" ? () => setTab("profile") : undefined}
-            avatarUrl={settings.avatarUrl}
-            name={settings.name}
-          />
           <div className="flex-1 overflow-y-auto rota-scroll-pad" ref={homeScrollRef}>
+            <AppHeader
+              title={{ home: "Rota", schedule: "Schedule", todo: "To-Do", advisor: "Advisor", profile: "Profile" }[tab]}
+              onProfile={tab !== "profile" ? () => setTab("profile") : undefined}
+              avatarUrl={settings.avatarUrl}
+              name={settings.name}
+            />
             <div className="max-w-2xl mx-auto w-full">
               {tab === "home" && (
                 <PullToRefresh scrollRef={homeScrollRef} onRefresh={() => loadUserData(user)}>
