@@ -39,6 +39,9 @@ repositories {
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
+    // Encrypted local storage for the auth tokens native code needs to
+    // claim a Rota Tap transfer while the app is backgrounded/closed.
+    implementation 'androidx.security:security-crypto:1.1.0'
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"

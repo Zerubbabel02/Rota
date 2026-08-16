@@ -37,6 +37,33 @@
 
         </activity>
 
+        <!-- Catches a tap while the app is backgrounded or fully closed —
+             android.nfc.action.TECH_DISCOVERED can wake/launch an app from
+             cold, unlike enableReaderMode() (used while the app is open),
+             which only works with an active foreground Activity. No visible
+             UI: reads the tag, then acts on tap_receive_mode and finishes
+             itself immediately. -->
+        <activity
+            android:name=".RotaTapReceiverActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleTask"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.nfc.action.TECH_DISCOVERED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.action.TECH_DISCOVERED"
+                android:resource="@xml/nfc_tech_filter" />
+        </activity>
+
+        <!-- Accept/Decline buttons on the quick-accept notification — a
+             BroadcastReceiver so they work without the app running. -->
+        <receiver
+            android:name=".RotaTapActionReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

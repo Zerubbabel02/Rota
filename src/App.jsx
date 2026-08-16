@@ -98,11 +98,29 @@ const IS_NATIVE = Capacitor.isNativePlatform();
 // "listen for a tap" half capacitor-hce-plugin doesn't provide.
 const RotaNfcReader = registerPlugin("RotaNfcReader");
 
+// Keeps native code (RotaTapReceiverActivity, RotaTapActionReceiver) supplied
+// with a fresh session — those run without any JS/WebView alive at all, for
+// a tap that arrives while the app is backgrounded or fully closed.
+function syncNativeSession(session) {
+  if (!IS_NATIVE || !session?.access_token || !session?.refresh_token || !session?.user?.id) return;
+  RotaNfcReader.storeSession({
+    accessToken: session.access_token,
+    refreshToken: session.refresh_token,
+    userId: session.user.id,
+  }).catch(() => {});
+}
+
 const FONT_DISPLAY = "'Fredoka', 'Baloo 2', system-ui, sans-serif";
 const FONT_BODY = "'Nunito', system-ui, -apple-system, sans-serif";
 const FONT_MONO = "'IBM Plex Mono', ui-monospace, Menlo, monospace";
 
 const CATEGORIES = ["Housing", "Utilities", "Entertainment", "Savings", "Transport", "Other"];
+
+const TAP_RECEIVE_MODE_LABELS = {
+  quick_accept: "Notification",
+  open_app: "Open app",
+  auto_accept: "Automatic",
+};
 const PAYSTACK_PUBLIC_KEY = "pk_test_b8acc1eeb9f5b9140c1f20c56c426c16d3598add";
 // A function rather than a frozen object — CATEGORY_COLOR used to capture T's
 // hex values once at module load, so it never updated when the theme changed.
@@ -206,6 +224,7 @@ function defaultSettings() {
     totalBalance: 0,
     darkMode: false,
     cardLinkSkipped: false,
+    tapReceiveMode: "quick_accept",
   };
 }
 function mapProfile(row) {
@@ -220,6 +239,7 @@ function mapProfile(row) {
     totalBalance: Number(row.total_balance || 0),
     darkMode: !!row.dark_mode,
     cardLinkSkipped: !!row.card_link_skipped,
+    tapReceiveMode: row.tap_receive_mode || "quick_accept",
   };
 }
 function unmapSettings(partial) {
@@ -233,6 +253,7 @@ function unmapSettings(partial) {
   if ("totalBalance" in partial) out.total_balance = partial.totalBalance;
   if ("darkMode" in partial) out.dark_mode = partial.darkMode;
   if ("cardLinkSkipped" in partial) out.card_link_skipped = partial.cardLinkSkipped;
+  if ("tapReceiveMode" in partial) out.tap_receive_mode = partial.tapReceiveMode;
   return out;
 }
 
@@ -3689,6 +3710,82 @@ function AdvisorTab() {
 }
 
 /* ---------- Profile tab ---------- */
+function TapReceiveModeSheet({ value, onSelect, onClose }) {
+  const options = [
+    {
+      key: "quick_accept",
+      Icon: Bell,
+      title: "Notification",
+      description: "A tap drops a quick Accept/Decline notification — no need to open the app. Stays up for about a minute.",
+    },
+    {
+      key: "open_app",
+      Icon: Smartphone,
+      title: "Open app",
+      description: "A tap opens Rota straight to the accept screen, like scanning a QR code today.",
+    },
+    {
+      key: "auto_accept",
+      Icon: Wifi,
+      title: "Automatic",
+      description: "Money lands the instant you're tapped — no prompt at all. Fastest option, but there's no chance to decline a mistaken tap.",
+    },
+  ];
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 24 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="flex items-center justify-between mb-1">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            Rota Tap alerts
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+        <p className="text-xs mb-4" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+          How should Rota handle an incoming tap when someone sends you money?
+        </p>
+        <div className="flex flex-col gap-2.5">
+          {options.map(({ key, Icon, title, description }) => {
+            const active = value === key;
+            return (
+              <button
+                key={key}
+                onClick={() => onSelect(key)}
+                className="rounded-2xl p-4 flex items-start gap-3 text-left transition-transform active:scale-[0.98]"
+                style={{
+                  background: active ? `${T.gold}1A` : T.ink,
+                  border: `1.5px solid ${active ? T.gold : T.ink3}`,
+                }}
+              >
+                <div
+                  className="rounded-full flex items-center justify-center flex-shrink-0"
+                  style={{ width: 36, height: 36, background: active ? T.gold : T.ink3 }}
+                >
+                  <Icon size={17} color={active ? T.ink2 : T.muted} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">
+                      {title}
+                    </p>
+                    {active && <Check size={16} color={T.gold} />}
+                  </div>
+                  <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mt-0.5">
+                    {description}
+                  </p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadAvatar, onBiometricChange, hasBiometricConfirm, email, onCardLinked }) {
   const [editingName, setEditingName] = useState(false);
   const [name, setName] = useState(settings.name);
@@ -3698,6 +3795,7 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
   const [pinSheetOpen, setPinSheetOpen] = useState(false);
   const [cardSheetOpen, setCardSheetOpen] = useState(false);
   const [linkOverlayOpen, setLinkOverlayOpen] = useState(false);
+  const [tapModeSheetOpen, setTapModeSheetOpen] = useState(false);
   const [bioBusy, setBioBusy] = useState(false);
   const [bioError, setBioError] = useState("");
   const fileInputRef = useRef(null);
@@ -3918,6 +4016,18 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
             </span>
           )}
         </Row>
+        {IS_NATIVE && (
+          <button onClick={() => setTapModeSheetOpen(true)} className="w-full text-left">
+            <Row icon={Wifi} label="Rota Tap alerts">
+              <span className="flex items-center gap-1.5">
+                <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                  {TAP_RECEIVE_MODE_LABELS[settings.tapReceiveMode] || TAP_RECEIVE_MODE_LABELS.quick_accept}
+                </span>
+                <ChevronDown size={14} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
+              </span>
+            </Row>
+          </button>
+        )}
         <Row icon={Wallet} label="Currency">
           <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm">
             ₦ Naira
@@ -3949,6 +4059,16 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
       </button>
 
       {pwSheetOpen && <PasswordChangeSheet onClose={() => setPwSheetOpen(false)} />}
+      {tapModeSheetOpen && (
+        <TapReceiveModeSheet
+          value={settings.tapReceiveMode}
+          onSelect={(mode) => {
+            onUpdate({ tapReceiveMode: mode });
+            setTapModeSheetOpen(false);
+          }}
+          onClose={() => setTapModeSheetOpen(false)}
+        />
+      )}
       {pinSheetOpen && (
         <PinSheet
           hasPin={settings.hasPin}
@@ -4771,6 +4891,14 @@ export default function RotaApp() {
     };
   }, []);
 
+  // RotaTapReceiverActivity reads this preference natively (no JS running)
+  // the moment a background/closed-app tap comes in, so it has to be kept
+  // in sync here rather than looked up from Supabase at tap time.
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    RotaNfcReader.setTapReceiveMode({ mode: settings.tapReceiveMode || "quick_accept" }).catch(() => {});
+  }, [settings.tapReceiveMode]);
+
   // Registers this device for push notifications once signed in, so a
   // server-side function can notify this phone about a transaction even
   // while the app is closed. Re-registering on every sign-in is cheap and
@@ -4844,7 +4972,7 @@ export default function RotaApp() {
     const [{ data: profileRow }, { data: paymentRows }, { data: todoRows }] = await Promise.all([
       supabase
         .from("profiles")
-        .select("id,name,notifications,biometric,card_linked,card_last4,avatar_url,has_pin,total_balance,dark_mode,card_link_skipped")
+        .select("id,name,notifications,biometric,card_linked,card_last4,avatar_url,has_pin,total_balance,dark_mode,card_link_skipped,tap_receive_mode")
         .eq("id", authUser.id)
         .single(),
       supabase.from("payments").select("*").eq("user_id", authUser.id).order("date", { ascending: true }),
@@ -4871,8 +4999,10 @@ export default function RotaApp() {
     let alive = true;
     supabase.auth.getSession().then(({ data }) => {
       if (!alive) return;
-      if (data.session) loadUserData(data.session.user);
-      else {
+      if (data.session) {
+        loadUserData(data.session.user);
+        syncNativeSession(data.session);
+      } else {
         setScreen("welcome");
         setAuthLoading(false);
       }
@@ -4886,7 +5016,12 @@ export default function RotaApp() {
         setPayments([]);
         setTodos([]);
         setScreen("welcome");
+        if (IS_NATIVE) RotaNfcReader.clearSession().catch(() => {});
       }
+      // Covers SIGNED_IN, TOKEN_REFRESHED, INITIAL_SESSION, USER_UPDATED —
+      // native code (background/closed-app taps) needs whatever the
+      // current, freshest token pair is, not just the one from sign-in.
+      if (session) syncNativeSession(session);
     });
     return () => {
       alive = false;
