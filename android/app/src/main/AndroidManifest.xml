@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="true"
@@ -35,27 +36,19 @@
                     android:host="rota-app-zerubbabel1.vercel.app" />
             </intent-filter>
 
-        </activity>
-
-        <!-- Catches a tap while the app is backgrounded or fully closed —
-             android.nfc.action.TECH_DISCOVERED can wake/launch an app from
-             cold, unlike enableReaderMode() (used while the app is open),
-             which only works with an active foreground Activity. No visible
-             UI: reads the tag, then acts on tap_receive_mode and finishes
-             itself immediately. -->
-        <activity
-            android:name=".RotaTapReceiverActivity"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:excludeFromRecents="true"
-            android:noHistory="true"
-            android:launchMode="singleTask"
-            android:exported="true">
+            <!-- Google sign-in's return trip from the system browser — a
+                 custom scheme, not another App Link, because App Links only
+                 intercept the *initial* external navigation to them; the
+                 same-tab redirect chain Google/Supabase's OAuth callback
+                 goes through never re-triggers that. See NATIVE_OAUTH_REDIRECT_URL
+                 in App.jsx. -->
             <intent-filter>
-                <action android:name="android.nfc.action.TECH_DISCOVERED" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.rota.app" android:host="auth-callback" />
             </intent-filter>
-            <meta-data
-                android:name="android.nfc.action.TECH_DISCOVERED"
-                android:resource="@xml/nfc_tech_filter" />
+
         </activity>
 
         <!-- Accept/Decline buttons on the quick-accept notification — a
@@ -63,6 +56,24 @@
         <receiver
             android:name=".RotaTapActionReceiver"
             android:exported="false" />
+
+        <!-- Replaces (not adds to) @capacitor/push-notifications' own
+             MessagingService — RotaMessagingService extends it, so every
+             existing push still behaves the same, except tap_quick_accept
+             data messages, which it shows as a native Accept/Decline banner
+             instead of relying on OS-level tag dispatch to a closed app
+             (that path proved unreliable across devices — see
+             RotaTapProtocol.kt's history). -->
+        <service
+            android:name="com.capacitorjs.plugins.pushnotifications.MessagingService"
+            tools:node="remove" />
+        <service
+            android:name=".RotaMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -114,4 +125,15 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Required for the Airtime/Data contact picker (@capacitor-community/contacts).
+         The plugin groups READ_CONTACTS + WRITE_CONTACTS under one runtime
+         permission alias, so both must be declared here or the OS silently
+         denies the whole alias with no dialog, even though only reading a
+         picked contact is ever actually used. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <!-- Lets "open app" mode actually open the app automatically (same
+         mechanism an incoming call uses), instead of only showing a
+         notification the receiver has to tap first. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 </manifest>

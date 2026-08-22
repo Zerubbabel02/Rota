@@ -5,11 +5,19 @@ import { Capacitor, registerPlugin } from "@capacitor/core";
 import { NativeBiometric } from "capacitor-native-biometric";
 import { HCECapacitorPlugin } from "capacitor-hce-plugin";
 import { App as CapacitorApp } from "@capacitor/app";
+import { Browser } from "@capacitor/browser";
+import { Share } from "@capacitor/share";
+import { Filesystem, Directory } from "@capacitor/filesystem";
 import { PushNotifications } from "@capacitor/push-notifications";
 import { LocalNotifications } from "@capacitor/local-notifications";
+import { Contacts } from "@capacitor-community/contacts";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import RotaMark from "./components/RotaMark.jsx";
+import mtnLogo from "./assets/networks/mtn.svg";
+import gloLogo from "./assets/networks/glo.svg";
+import airtelLogo from "./assets/networks/airtel.svg";
+import nineMobileLogo from "./assets/networks/9mobile.svg";
 import {
   Home as HomeIcon,
   Calendar,
@@ -45,6 +53,9 @@ import {
   ArrowLeftRight,
   Wifi,
   Eye,
+  EyeOff,
+  Gift,
+  Zap,
 } from "lucide-react";
 
 /* ---------- Design tokens ---------- */
@@ -93,14 +104,39 @@ function applyTheme(isDark) {
 // hash-only-on-server model as the transaction PIN.
 const NATIVE_BIO_SERVER = "rota-native-biometric";
 const NATIVE_BIO_FLAG_KEY = "rota_native_bio_enrolled";
+// Which account this device's enrolled Keystore secret belongs to, so the
+// signed-out login screen can offer a biometric quick-login only when this
+// specific device has actually enrolled someone before — a fresh install
+// naturally has neither key set, which is what forces the real password.
+const NATIVE_BIO_USER_KEY = "rota_native_bio_user_id";
+const NATIVE_BIO_LABEL_KEY = "rota_native_bio_label";
 const IS_NATIVE = Capacitor.isNativePlatform();
 // Native-only local plugin (android/app/.../RotaNfcReaderPlugin.kt) — the
 // "listen for a tap" half capacitor-hce-plugin doesn't provide.
 const RotaNfcReader = registerPlugin("RotaNfcReader");
 
-// Keeps native code (RotaTapReceiverActivity, RotaTapActionReceiver) supplied
-// with a fresh session — those run without any JS/WebView alive at all, for
-// a tap that arrives while the app is backgrounded or fully closed.
+// Global stack of "close me" callbacks for whatever sheet/overlay is
+// currently mounted, so the Android hardware/gesture back button can close
+// the topmost one without every component needing to know about every
+// other — each sheet pushes itself on mount and pops on unmount via
+// useBackClose below; the top-level backButton listener (in RotaApp) just
+// pops and calls the top of the stack, which naturally cascades correctly
+// for sheets nested inside other sheets.
+const rotaBackStack = [];
+function useBackClose(onClose, active = true) {
+  useEffect(() => {
+    if (!active || !onClose) return;
+    rotaBackStack.push(onClose);
+    return () => {
+      const idx = rotaBackStack.lastIndexOf(onClose);
+      if (idx !== -1) rotaBackStack.splice(idx, 1);
+    };
+  }, [onClose, active]);
+}
+
+// Keeps native code (RotaTapActionReceiver, RotaMessagingService) supplied
+// with a fresh session — those run without any JS/WebView alive at all, e.g.
+// tapping Accept on a Rota Tap notification while the app is closed.
 function syncNativeSession(session) {
   if (!IS_NATIVE || !session?.access_token || !session?.refresh_token || !session?.user?.id) return;
   RotaNfcReader.storeSession({
@@ -110,14 +146,90 @@ function syncNativeSession(session) {
   }).catch(() => {});
 }
 
+// Passively broadcasts "this phone belongs to receiveToken" via HCE — the
+// whole reason receiving a Rota Tap no longer needs this phone to do
+// anything at all. Answers screen-off and app-closed exactly like sending
+// already did (persistMessage/persistent together make the native side keep
+// answering indefinitely instead of self-clearing after one tap, see
+// KHostApduService.kt). Whoever taps this phone reads the token and calls
+// tap-transfer-direct themselves.
+function startReceiveBroadcast(token) {
+  if (!IS_NATIVE || !token) return Promise.resolve();
+  const url = `${window.location.origin}/?receive=${token}`;
+  return HCECapacitorPlugin.isNfcHceSupported()
+    .then(({ supported }) => {
+      if (!supported) return;
+      return HCECapacitorPlugin.startNfcHce({ content: url, mimeType: "RTD_URI", persistMessage: true, persistent: true });
+    })
+    .catch(() => {});
+}
+
 const FONT_DISPLAY = "'Fredoka', 'Baloo 2', system-ui, sans-serif";
 const FONT_BODY = "'Nunito', system-ui, -apple-system, sans-serif";
 const FONT_MONO = "'IBM Plex Mono', ui-monospace, Menlo, monospace";
 
 const CATEGORIES = ["Housing", "Utilities", "Entertainment", "Savings", "Transport", "Other"];
 
+// Approximate, prefix-based — number portability means this is a best guess,
+// same as how OPay/PalmPay's own auto-detect works, not a certainty.
+const NETWORK_PREFIXES = {
+  MTN: ["0803", "0806", "0703", "0706", "0813", "0814", "0816", "0810", "0903", "0906", "0913", "0916"],
+  Glo: ["0805", "0807", "0705", "0815", "0811", "0905", "0915"],
+  Airtel: ["0802", "0808", "0708", "0812", "0701", "0902", "0901", "0904", "0912", "0907"],
+  "9mobile": ["0809", "0817", "0818", "0908", "0909"],
+};
+function detectNetwork(phone) {
+  const prefix = phone.slice(0, 4);
+  for (const [network, prefixes] of Object.entries(NETWORK_PREFIXES)) {
+    if (prefixes.includes(prefix)) return network;
+  }
+  return null;
+}
+const NETWORK_LOGOS = { MTN: mtnLogo, Glo: gloLogo, Airtel: airtelLogo, "9mobile": nineMobileLogo };
+const DISCOS = [
+  "Ikeja Electric",
+  "Eko Electric",
+  "Abuja Electric",
+  "Kano Electric",
+  "Port Harcourt Electric",
+  "Jos Electric",
+  "Kaduna Electric",
+  "Benin Electric",
+  "Enugu Electric",
+  "Ibadan Electric",
+  "Yola Electric",
+];
+const DATA_BUNDLES = [
+  { label: "1GB — 30 days", value: "1gb" },
+  { label: "2GB — 30 days", value: "2gb" },
+  { label: "5GB — 30 days", value: "5gb" },
+  { label: "10GB — 30 days", value: "10gb" },
+];
+const AIRTIME_PRESETS = [50, 100, 200, 500, 1000, 2000];
+const DATA_TABS = ["Hot", "Daily", "Weekly", "Monthly"];
+const DATA_PLANS_BY_TAB = {
+  Hot: [
+    { label: "1GB", sub: "1 Day", value: "hot-1gb-1d" },
+    { label: "2.5GB", sub: "1 Day", value: "hot-2.5gb-1d" },
+    { label: "500MB", sub: "7 Days", value: "hot-500mb-7d" },
+  ],
+  Daily: [
+    { label: "1GB", sub: "1 Day", value: "daily-1gb" },
+    { label: "2GB", sub: "1 Day", value: "daily-2gb" },
+  ],
+  Weekly: [
+    { label: "1.5GB", sub: "7 Days", value: "weekly-1.5gb" },
+    { label: "3.5GB", sub: "7 Days", value: "weekly-3.5gb" },
+  ],
+  Monthly: [
+    { label: "2GB", sub: "30 Days", value: "monthly-2gb" },
+    { label: "7GB", sub: "30 Days", value: "monthly-7gb" },
+    { label: "10GB", sub: "30 Days", value: "monthly-10gb" },
+  ],
+};
+
 const TAP_RECEIVE_MODE_LABELS = {
-  quick_accept: "Notification",
+  quick_accept: "Notify",
   open_app: "Open app",
   auto_accept: "Automatic",
 };
@@ -140,6 +252,16 @@ function categoryColor(category) {
 /* ---------- Helpers ---------- */
 function naira(n) {
   return "₦" + Number(n || 0).toLocaleString("en-NG", { maximumFractionDigits: 0 });
+}
+function maskEmail(email) {
+  if (!email) return "—";
+  const [local, domain] = email.split("@");
+  if (!domain) return email;
+  return `${local[0] || ""}${"*".repeat(Math.max(local.length - 1, 1))}@${domain}`;
+}
+function maskDate(dateStr) {
+  if (!dateStr) return "Add date of birth";
+  return "•• ••, ••••";
 }
 function isoOffset(days) {
   const d = new Date();
@@ -225,6 +347,13 @@ function defaultSettings() {
     darkMode: false,
     cardLinkSkipped: false,
     tapReceiveMode: "quick_accept",
+    referralCode: null,
+    phone: null,
+    phoneVerified: false,
+    nickname: null,
+    gender: null,
+    dateOfBirth: null,
+    address: null,
   };
 }
 function mapProfile(row) {
@@ -240,6 +369,14 @@ function mapProfile(row) {
     darkMode: !!row.dark_mode,
     cardLinkSkipped: !!row.card_link_skipped,
     tapReceiveMode: row.tap_receive_mode || "quick_accept",
+    tapReceiveToken: row.tap_receive_token || null,
+    referralCode: row.referral_code || null,
+    phone: row.phone || null,
+    phoneVerified: !!row.phone_verified,
+    nickname: row.nickname || null,
+    gender: row.gender || null,
+    dateOfBirth: row.date_of_birth || null,
+    address: row.address || null,
   };
 }
 function unmapSettings(partial) {
@@ -254,6 +391,12 @@ function unmapSettings(partial) {
   if ("darkMode" in partial) out.dark_mode = partial.darkMode;
   if ("cardLinkSkipped" in partial) out.card_link_skipped = partial.cardLinkSkipped;
   if ("tapReceiveMode" in partial) out.tap_receive_mode = partial.tapReceiveMode;
+  if ("phone" in partial) out.phone = partial.phone;
+  if ("phoneVerified" in partial) out.phone_verified = partial.phoneVerified;
+  if ("nickname" in partial) out.nickname = partial.nickname;
+  if ("gender" in partial) out.gender = partial.gender;
+  if ("dateOfBirth" in partial) out.date_of_birth = partial.dateOfBirth;
+  if ("address" in partial) out.address = partial.address;
   return out;
 }
 
@@ -262,6 +405,15 @@ function unmapSettings(partial) {
 // body dots with ring-and-dot finder markers instead, matching Rota's UI.
 // Cached so repeated receipt generation doesn't re-fetch the icon each time.
 let _logoImagePromise = null;
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 function loadLogoImage() {
   if (!_logoImagePromise) {
     _logoImagePromise = new Promise((resolve) => {
@@ -364,6 +516,11 @@ function QrScanner({ onResult, onCancel }) {
   const rafRef = useRef(null);
   const streamRef = useRef(null);
   const [error, setError] = useState("");
+  // Kept invisible (not unmounted, so the ref is always attached for
+  // getUserMedia to hand its stream to) until the stream is actually live —
+  // an empty <video> element otherwise briefly shows the WebView's own
+  // default play-icon placeholder before any frames arrive.
+  const [cameraReady, setCameraReady] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -400,6 +557,7 @@ function QrScanner({ onResult, onCancel }) {
           videoRef.current.play();
         }
         tick();
+        setCameraReady(true);
       })
       .catch(() => setError("Couldn't access the camera — check your browser's camera permission for this site."));
 
@@ -419,10 +577,21 @@ function QrScanner({ onResult, onCancel }) {
         </p>
       ) : (
         <div className="relative rounded-2xl overflow-hidden" style={{ width: 220, height: 220, background: "#000" }}>
-          <video ref={videoRef} muted playsInline className="w-full h-full" style={{ objectFit: "cover" }} />
+          <video
+            ref={videoRef}
+            muted
+            playsInline
+            className="w-full h-full"
+            style={{ objectFit: "cover", opacity: cameraReady ? 1 : 0 }}
+          />
+          {!cameraReady && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Loader2 size={22} className="animate-spin" color={T.gold} />
+            </div>
+          )}
           <div
             className="absolute inset-6 rounded-2xl pointer-events-none"
-            style={{ border: `2px solid ${T.gold}`, opacity: 0.7 }}
+            style={{ border: `2px solid ${T.gold}`, opacity: cameraReady ? 0.7 : 0 }}
           />
         </div>
       )}
@@ -435,28 +604,31 @@ function QrScanner({ onResult, onCancel }) {
 }
 
 /* ---------- Shared bits ---------- */
-function AppHeader({ title, onProfile, avatarUrl, name }) {
+function AppHeader({ title, onProfile, showAvatar, avatarUrl, name, headerRef }) {
   return (
     <div
+      ref={headerRef}
       className="rota-header-safe rota-header-glass flex items-center justify-between px-5 pb-3"
       style={{ background: `${T.ink}B8`, backdropFilter: "blur(20px) saturate(1.5)", WebkitBackdropFilter: "blur(20px) saturate(1.5)" }}
     >
       <h1 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold">
         {title}
       </h1>
-      <button
-        onClick={onProfile}
-        className="rounded-full overflow-hidden flex items-center justify-center transition-transform active:scale-90 flex-shrink-0"
-        style={{ width: 36, height: 36, background: T.gold, border: `1px solid ${T.ink3}` }}
-      >
-        {avatarUrl ? (
-          <img src={avatarUrl} alt="" className="w-full h-full" style={{ objectFit: "cover" }} />
-        ) : (
-          <span style={{ fontFamily: FONT_DISPLAY, color: T.ink2 }} className="text-sm font-semibold">
-            {(name || "?").charAt(0).toUpperCase()}
-          </span>
-        )}
-      </button>
+      {showAvatar && (
+        <button
+          onClick={onProfile}
+          className="rounded-full overflow-hidden flex items-center justify-center transition-transform active:scale-90 flex-shrink-0"
+          style={{ width: 36, height: 36, background: T.gold, border: `1px solid ${T.ink3}` }}
+        >
+          {avatarUrl ? (
+            <img src={avatarUrl} alt="" className="w-full h-full" style={{ objectFit: "cover" }} />
+          ) : (
+            <span style={{ fontFamily: FONT_DISPLAY, color: T.ink2 }} className="text-sm font-semibold">
+              {(name || "?").charAt(0).toUpperCase()}
+            </span>
+          )}
+        </button>
+      )}
     </div>
   );
 }
@@ -647,6 +819,7 @@ function SimulateInboundForm({ defaultBank = "", defaultName = "", hideNameBank,
 }
 
 function AddMoneySheet({ wallet, onClose, onCredited, onClaimed, user }) {
+  useBackClose(onClose);
   const [method, setMethod] = useState(null); // null = method list
   const [copied, setCopied] = useState(false);
   const [prefillBank, setPrefillBank] = useState("");
@@ -656,7 +829,10 @@ function AddMoneySheet({ wallet, onClose, onCredited, onClaimed, user }) {
 
   useEffect(() => {
     if (method === "qr" && qrTab === "mine" && qrCanvasRef.current) {
-      drawStyledQR(qrCanvasRef.current, wallet.virtual_account_number, { size: 160, fg: T.paper, bg: T.ink2 });
+      // Standard dark-on-light modules — the polarity scanners are tuned
+      // for and read fastest. The dark backdrop that makes it "pop" is the
+      // card behind it (see the container below), not the QR itself.
+      drawStyledQR(qrCanvasRef.current, wallet.virtual_account_number, { size: 160, fg: "#0B1120", bg: "#FFFFFF" });
     }
   }, [method, qrTab, wallet.virtual_account_number]);
 
@@ -811,11 +987,11 @@ function AddMoneySheet({ wallet, onClose, onCredited, onClaimed, user }) {
 
             {qrTab === "mine" ? (
               <>
-                <div className="rounded-2xl p-6 flex flex-col items-center gap-3" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
-                  <div className="rounded-xl overflow-hidden" style={{ width: 160, height: 160 }}>
-                    <canvas ref={qrCanvasRef} />
+                <div className="rounded-2xl p-6 flex flex-col items-center gap-3" style={{ background: "#0B1120", border: `1px solid ${T.ink3}` }}>
+                  <div className="rounded-xl overflow-hidden p-2.5" style={{ background: "#FFFFFF" }}>
+                    <canvas ref={qrCanvasRef} style={{ width: 160, height: 160, display: "block" }} />
                   </div>
-                  <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs text-center">
+                  <p style={{ fontFamily: FONT_BODY, color: "#94A3B8" }} className="text-xs text-center">
                     Show this to any Rota user to receive a transfer straight into this account.
                   </p>
                 </div>
@@ -841,6 +1017,7 @@ function AddMoneySheet({ wallet, onClose, onCredited, onClaimed, user }) {
 }
 
 function SendMoneySheet({ wallet, hasPin, hasBiometric, onClose, onSent }) {
+  useBackClose(onClose);
   const [step, setStep] = useState("recipient"); // recipient | amount | review
   const [confirming, setConfirming] = useState(false);
   const kbInset = useKeyboardInset();
@@ -1215,22 +1392,29 @@ function SendMoneySheet({ wallet, hasPin, hasBiometric, onClose, onSent }) {
 /* ---------- Rota Tap ---------- */
 // The sender authorizes an amount with PIN/biometric up front (same
 // ConfirmSheet everything else uses), which opens a 10-minute claim window
-// on the server. Nothing moves until the other person scans the QR code and
-// accepts — deliberately camera-only, not NFC: Web NFC can only read/write
-// passive tags, never exchange data with another active phone, so there's
-// no browser API that could make a real phone-to-phone tap work here.
-// Camera + QR works identically on a phone or a laptop webcam instead.
-// Money debits from the sender only once the receiver taps Accept.
-function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed }) {
+// on the server for the QR/camera path — works on any phone or laptop, no
+// app required on the other end. For a real NFC tap between two Rota
+// phones, the roles are flipped from what you'd expect: the RECEIVER
+// passively broadcasts their own account identity the whole time (see
+// startReceiveBroadcast, module scope) — proven reliable even screen-off/
+// app-closed, since that's exactly how sending already worked. The SENDER
+// (this screen, always open/foreground since it needs PIN/biometric anyway)
+// reads that broadcast with enableReaderMode() — also proven reliable — and
+// calls tap-transfer-direct itself. That sidesteps the one thing that
+// turned out not to work: Android reliably waking a closed app's own code
+// from an NFC tap it didn't initiate.
+function TapSendSheet({ wallet, hasPin, hasBiometric, myReceiveToken, onBack, onClose, onClaimed }) {
+  useBackClose(onBack || onClose);
   const [step, setStep] = useState("amount"); // amount | confirm | ready | claimed
   const [amount, setAmount] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [transfer, setTransfer] = useState(null); // { id, token, claimUrl }
   const [claimedBy, setClaimedBy] = useState(null); // { name, avatarUrl }
-  const [hceStatus, setHceStatus] = useState(null); // null | "unsupported" | "active" | "tapped"
+  const [nfcStatus, setNfcStatus] = useState(null); // null | "unsupported" | "listening" | "tapped"
   const canvasRef = useRef(null);
   const pollRef = useRef(null);
+  const hasTappedRef = useRef(false);
 
   const canSend = Number(amount) > 0 && Number(amount) <= Number(wallet.balance || 0) && hasPin;
 
@@ -1251,10 +1435,16 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
     setStep("ready");
   }
 
+  // QR drawing + polling for claim status — deliberately re-runs whenever
+  // transfer changes, since a tap in Notification/Open app mode (handled by
+  // the separate NFC effect below) replaces the QR-code transfer with the
+  // one the tap actually created, and this needs to poll *that* one.
   useEffect(() => {
     if (step !== "ready" || !transfer) return;
     if (canvasRef.current) {
-      drawStyledQR(canvasRef.current, transfer.claimUrl, { size: 176, fg: "#FFFFFF", bg: T.ink });
+      // Standard dark-on-light modules, same reasoning as the receive QR in
+      // AddMoneySheet — the dark backdrop is the card, not the QR itself.
+      drawStyledQR(canvasRef.current, transfer.claimUrl, { size: 176, fg: "#0B1120", bg: "#FFFFFF" });
     }
     pollRef.current = setInterval(async () => {
       const { data } = await supabase
@@ -1271,46 +1461,87 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
       }
     }, 2500);
 
-    // Emulate the same claim URL as an NFC tag, alongside the QR code —
-    // any phone that taps ours gets the normal "open this link?" system
-    // prompt, no app required on their end. QR still works either way.
-    let hceListener = null;
-    if (IS_NATIVE) {
-      // This device can't be a reader and a card at the same time —
-      // pause our own tap-listening while we're the one being tapped.
-      RotaNfcReader.stopListening().catch(() => {});
-      HCECapacitorPlugin.isNfcHceSupported()
-        .then(({ supported }) => {
-          if (!supported) {
-            setHceStatus("unsupported");
-            return;
-          }
-          return HCECapacitorPlugin.startNfcHce({
-            content: transfer.claimUrl,
-            mimeType: "RTD_URI",
-            persistMessage: false,
-          }).then(() => setHceStatus("active"));
-        })
-        .catch(() => setHceStatus("unsupported"));
+    return () => clearInterval(pollRef.current);
+  }, [step, transfer, wallet.id, onClaimed]);
 
-      HCECapacitorPlugin.addListener("onStatusChanged", ({ eventName }) => {
-        if (eventName === "scan-completed") setHceStatus("tapped");
-        else if (eventName === "card-emulator-started") setHceStatus("active");
-      }).then((handle) => {
-        hceListener = handle;
+  // Listens for another Rota phone's passively-broadcast receive identity —
+  // reading (not emitting) is the reliable direction for an NFC tap; see the
+  // comment above the component. A successful read completes the transfer
+  // directly through the server instead of waiting on a claim.
+  //
+  // Deliberately only depends on [step], not transfer — a tap in
+  // Notification/Open app mode calls setTransfer() below to hand the new
+  // transfer to the polling effect above, which would otherwise re-trigger
+  // *this* effect too and hand out a fresh, reset hasTappedRef right as it
+  // matters most. hasTappedRef guards a real bug: two phones held near each
+  // other (or a deliberate second tap out of impatience while the first is
+  // still pending accept) kept this listener live for the whole "ready"
+  // session, so every additional read created a brand new transfer under the
+  // same PIN authorization — confirmed from the database after a live test
+  // sent the same amount twice from one approval.
+  useEffect(() => {
+    if (step !== "ready" || !IS_NATIVE) return;
+    hasTappedRef.current = false;
+    let nfcListener = null;
+    setNfcStatus("listening");
+    // This device can't emit its own receive broadcast and actively read
+    // someone else's at the same time — free the radio from the former
+    // before claiming it for the latter (harmless no-op if it wasn't
+    // running yet).
+    HCECapacitorPlugin.stopNfcHce().catch(() => {});
+    RotaNfcReader.startListening().catch(() => setNfcStatus("unsupported"));
+    RotaNfcReader.addListener("tapReceived", async ({ url }) => {
+      if (hasTappedRef.current) return;
+
+      let receiveToken = null;
+      try {
+        receiveToken = new URL(url).searchParams.get("receive");
+      } catch {
+        // not a URL we care about
+      }
+      if (!receiveToken) return; // e.g. a stray tag, not a Rota receive broadcast
+
+      hasTappedRef.current = true;
+      RotaNfcReader.stopListening().catch(() => {});
+      setNfcStatus("tapped");
+      // sessionTransferId is the QR code's own transfer, shown on this same
+      // screen — passing it lets the server atomically expire it the moment
+      // this tap succeeds, so whoever scans the QR afterward correctly gets
+      // "no longer valid" instead of also being able to claim the same
+      // authorized amount a second time.
+      const { data, error: fnError } = await supabase.functions.invoke("tap-transfer-direct", {
+        body: { amount: Number(amount), receiveToken, sessionTransferId: transfer?.id },
       });
-    }
+      if (fnError || !data?.ok) {
+        setError((data && data.error) || "That tap didn't go through — try again.");
+        // Genuinely failed (not just "still pending") — safe to accept
+        // another tap for this same authorized amount.
+        hasTappedRef.current = false;
+        RotaNfcReader.startListening().catch(() => {});
+        setNfcStatus("listening");
+        return;
+      }
+
+      if (data.status === "completed") {
+        setClaimedBy({ name: data.receiverName, avatarUrl: data.receiverAvatarUrl || null });
+        onClaimed(Number(data.newBalance));
+        setStep("claimed");
+      } else {
+        // pending (Notification / Open app modes) — hands off to the
+        // polling effect above, which picks up this new transfer id.
+        setTransfer({ id: data.id, token: data.token, claimUrl: `${window.location.origin}/?tap=${data.token}` });
+      }
+    }).then((handle) => {
+      nfcListener = handle;
+    });
 
     return () => {
-      clearInterval(pollRef.current);
-      if (IS_NATIVE) {
-        HCECapacitorPlugin.stopNfcHce().catch(() => {});
-        RotaNfcReader.startListening().catch(() => {});
-        hceListener?.remove();
-      }
+      RotaNfcReader.stopListening().catch(() => {});
+      nfcListener?.remove();
+      startReceiveBroadcast(myReceiveToken); // hand NFC back to passive receiving
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, transfer]);
+  }, [step]);
 
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
@@ -1380,13 +1611,15 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
               {naira(Number(amount))}
             </div>
 
-            <div className="rounded-2xl p-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
-              <canvas ref={canvasRef} />
+            <div className="rounded-2xl p-4" style={{ background: "#0B1120", border: `1px solid ${T.ink3}` }}>
+              <div className="rounded-xl p-2.5" style={{ background: "#FFFFFF" }}>
+                <canvas ref={canvasRef} style={{ width: 176, height: 176, display: "block" }} />
+              </div>
             </div>
-            {hceStatus === "active" || hceStatus === "tapped" ? (
+            {nfcStatus === "listening" || nfcStatus === "tapped" ? (
               <p className="text-xs flex items-center gap-1.5 justify-center" style={{ color: T.ok, fontFamily: FONT_BODY }}>
                 <Wifi size={13} style={{ transform: "rotate(90deg)" }} />
-                {hceStatus === "tapped" ? "Tapped! Waiting for them to accept…" : "Hold the backs of your phones together, or have them scan the QR code."}
+                {nfcStatus === "tapped" ? "Tapped! Completing…" : "Hold the backs of your phones together, or have them scan the QR code."}
               </p>
             ) : (
               <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
@@ -1446,6 +1679,7 @@ function TapSendSheet({ wallet, hasPin, hasBiometric, onBack, onClose, onClaimed
 // keeps TapSendSheet and TapReceiveSheet as separate, focused components
 // rather than one sheet trying to branch internally.
 function RotaTapChooser({ onSend, onReceive, onClose }) {
+  useBackClose(onClose);
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
@@ -1524,6 +1758,7 @@ function ScanQrToClaim({ user, onClaimed, onCancel }) {
 }
 
 function TapReceiveSheet({ user, onBack, onClose, onClaimed }) {
+  useBackClose(onBack || onClose);
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
@@ -1547,6 +1782,369 @@ function TapReceiveSheet({ user, onBack, onClose, onClaimed }) {
             onClose();
           }}
         />
+      </div>
+    </div>
+  );
+}
+
+function ReferralSheet({ referralCode, onClose }) {
+  useBackClose(onClose);
+  const [copied, setCopied] = useState(false);
+  const link = referralCode ? `${OAUTH_REDIRECT_URL}?ref=${referralCode}` : "";
+
+  function copyLink() {
+    if (!link) return;
+    navigator.clipboard?.writeText(link).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 20 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "80vh" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            Refer & Earn
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+        <div className="rounded-2xl p-5 mb-4 flex flex-col items-center text-center" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+          <div className="rounded-full flex items-center justify-center mb-3" style={{ width: 56, height: 56, background: `${T.gold}1F` }}>
+            <Gift size={26} color={T.gold} />
+          </div>
+          <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-medium mb-1">
+            Invite friends to Rota
+          </p>
+          <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+            Share your link below — anyone who joins through it is tied to your account.
+          </p>
+        </div>
+        {referralCode ? (
+          <>
+            <div className="rounded-xl px-3 py-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-xs truncate">
+                {link}
+              </span>
+            </div>
+            <button
+              onClick={copyLink}
+              className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95"
+              style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+            >
+              <Copy size={15} /> {copied ? "Copied" : "Copy link"}
+            </button>
+          </>
+        ) : (
+          <p className="text-xs text-center" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+            Setting up your referral link — check back in a moment.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Airtime/data/electricity share the same shape (pick a target, pick an
+// amount, confirm) even though electricity's target is a meter number and
+// disco rather than a phone number and network — one sheet parameterized by
+// mode instead of three near-identical ones. No provider is wired up yet,
+// so this walks the whole flow and stops at an honest "not live yet" rather
+// than pretending to charge anything.
+// Full page rather than a bottom sheet, matching the reference layout — the
+// contact picker uses the plugin's native pickContact (a system picker
+// intent), which still requires READ_CONTACTS/WRITE_CONTACTS to be declared
+// in AndroidManifest.xml even though only a single contact is ever read.
+function BillsPurchaseSheet({ mode, onClose }) {
+  useBackClose(onClose);
+  const [step, setStep] = useState("form"); // form | confirm | notLive
+  const [phone, setPhone] = useState("");
+  const [network, setNetwork] = useState(null);
+  const [disco, setDisco] = useState(DISCOS[0]);
+  const [meterNumber, setMeterNumber] = useState("");
+  const [amount, setAmount] = useState("");
+  const [bundle, setBundle] = useState(null);
+  const [dataTab, setDataTab] = useState(DATA_TABS[0]);
+  const [contactError, setContactError] = useState("");
+  const [networkManual, setNetworkManual] = useState(false);
+  const [networkPickerOpen, setNetworkPickerOpen] = useState(false);
+
+  const title = mode === "airtime" ? "Airtime" : mode === "data" ? "Mobile Data" : "Electricity";
+  const Icon = mode === "airtime" ? Smartphone : mode === "data" ? Wifi : Zap;
+  const plan = bundle ? DATA_PLANS_BY_TAB[dataTab]?.find((p) => p.value === bundle) : null;
+
+  useEffect(() => {
+    if (mode === "electricity" || networkManual) return;
+    setNetwork(phone.length >= 4 ? detectNetwork(phone) : null);
+  }, [phone, mode, networkManual]);
+
+  const canContinue =
+    mode === "electricity" ? meterNumber.length >= 6 && Number(amount) > 0 : phone.length === 11 && (mode === "data" ? !!bundle : Number(amount) > 0);
+
+  async function pickFromContacts() {
+    setContactError("");
+    if (!IS_NATIVE) {
+      setContactError("Contact picking only works in the installed app.");
+      return;
+    }
+    try {
+      const { contact } = await Contacts.pickContact({ projection: { phones: true } });
+      const raw = contact?.phones?.[0]?.number || "";
+      const digits = raw.replace(/\D/g, "").slice(-11);
+      if (digits.length !== 11) {
+        setContactError("That contact doesn't have a Nigerian number saved.");
+        return;
+      }
+      setNetworkManual(false);
+      setPhone(digits);
+    } catch (e) {
+      const cancelled = String(e?.message || "").toLowerCase().includes("cancel");
+      if (!cancelled) setContactError("Couldn't open contacts.");
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 flex justify-center" style={{ zIndex: 26, background: T.ink }}>
+      <div className="relative w-full max-w-lg h-full overflow-y-auto flex flex-col">
+        <div className="flex items-center gap-3 px-5" style={{ paddingTop: "max(24px, env(safe-area-inset-top))" }}>
+          <button onClick={onClose} className="flex-shrink-0">
+            <ChevronDown size={20} color={T.paper} style={{ transform: "rotate(90deg)" }} />
+          </button>
+          <h1 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-xl font-semibold flex-1">
+            {title}
+          </h1>
+          <Icon size={18} color={T.gold} />
+        </div>
+
+        <div className="px-5 py-5 flex flex-col gap-4 flex-1">
+          {step === "notLive" ? (
+            <div className="flex flex-col items-center text-center gap-3 py-10">
+              <div className="rounded-full flex items-center justify-center" style={{ width: 56, height: 56, background: `${T.warn}1F` }}>
+                <Clock size={26} color={T.warn} />
+              </div>
+              <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-medium">
+                Not live yet
+              </p>
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs max-w-xs">
+                {title} isn't connected to a provider yet — this screen is ready to go the moment one is set up.
+              </p>
+              <button
+                onClick={onClose}
+                className="w-full rounded-2xl py-3 font-semibold text-sm mt-2 transition-transform active:scale-95"
+                style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+              >
+                Close
+              </button>
+            </div>
+          ) : step === "confirm" ? (
+            <>
+              <div className="rounded-2xl p-4 flex flex-col gap-2" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+                {mode === "electricity" ? (
+                  <>
+                    <ReceiptRow label="Disco" value={disco} />
+                    <ReceiptRow label="Meter number" value={meterNumber} mono />
+                  </>
+                ) : (
+                  <>
+                    <ReceiptRow label="Network" value={network || "Unknown — verify before buying"} />
+                    <ReceiptRow label="Phone number" value={phone} mono />
+                  </>
+                )}
+                <ReceiptRow label="Amount" value={mode === "data" ? `${plan?.label} — ${plan?.sub}` : naira(Number(amount) || 0)} mono />
+              </div>
+              <button
+                onClick={() => setStep("notLive")}
+                className="w-full rounded-2xl py-3 font-semibold text-sm transition-transform active:scale-95"
+                style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+              >
+                Pay
+              </button>
+              <button onClick={() => setStep("form")} className="text-xs text-center" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                Back
+              </button>
+            </>
+          ) : (
+            <>
+              {mode === "electricity" ? (
+                <div className="rounded-2xl p-3 flex flex-col gap-3" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+                  <select
+                    value={disco}
+                    onChange={(e) => setDisco(e.target.value)}
+                    className="w-full rounded-xl px-3 py-2.5 text-sm"
+                    style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+                  >
+                    {DISCOS.map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    value={meterNumber}
+                    onChange={(e) => setMeterNumber(e.target.value.replace(/\D/g, ""))}
+                    placeholder="Prepaid meter number"
+                    inputMode="numeric"
+                    className="w-full rounded-xl px-3 py-2.5 text-lg font-semibold"
+                    style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+                  />
+                </div>
+              ) : (
+                <div className="relative">
+                  <div className="rounded-2xl p-3 flex items-center gap-2" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+                    {phone.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setNetworkPickerOpen((v) => !v)}
+                        className="rounded-full pl-1 pr-2.5 py-1 text-xs font-semibold flex-shrink-0 flex items-center gap-1.5"
+                        style={{ background: `${T.gold}22`, color: T.gold, fontFamily: FONT_BODY }}
+                      >
+                        {network ? (
+                          <span
+                            className="rounded-full flex-shrink-0 overflow-hidden flex items-center justify-center"
+                            style={{ width: 18, height: 18, background: "#fff" }}
+                          >
+                            <img src={NETWORK_LOGOS[network]} alt="" className="w-full h-full object-contain p-[1px]" />
+                          </span>
+                        ) : null}
+                        {network || "Select"}
+                      </button>
+                    )}
+                    <input
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 11))}
+                      placeholder="080..."
+                      inputMode="numeric"
+                      className="flex-1 min-w-0 bg-transparent text-lg font-semibold"
+                      style={{ color: T.paper, fontFamily: FONT_MONO, outline: "none" }}
+                    />
+                    <button onClick={pickFromContacts} className="flex-shrink-0 rounded-lg p-1.5" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+                      <User size={16} color={T.gold} />
+                    </button>
+                  </div>
+                  {networkPickerOpen && (
+                    <div
+                      className="absolute left-3 top-full mt-1 rounded-xl overflow-hidden z-10"
+                      style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
+                    >
+                      {Object.keys(NETWORK_PREFIXES).map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          onClick={() => {
+                            setNetwork(n);
+                            setNetworkManual(true);
+                            setNetworkPickerOpen(false);
+                          }}
+                          className="w-full flex items-center gap-2.5 text-left px-4 py-2.5 text-sm"
+                          style={{ color: n === network ? T.gold : T.paper, fontFamily: FONT_BODY }}
+                        >
+                          <span
+                            className="rounded-full flex-shrink-0 overflow-hidden flex items-center justify-center"
+                            style={{ width: 22, height: 22, background: "#fff" }}
+                          >
+                            <img src={NETWORK_LOGOS[n]} alt="" className="w-full h-full object-contain p-[2px]" />
+                          </span>
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {contactError && (
+                <p className="text-xs -mt-2" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                  {contactError}
+                </p>
+              )}
+              {mode !== "electricity" && phone.length >= 4 && !network && (
+                <p className="text-xs -mt-2 flex items-center gap-1.5" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                  Couldn't detect a network — tap the chip to select one
+                </p>
+              )}
+
+              {mode === "data" ? (
+                <>
+                  <div className="flex gap-4 border-b" style={{ borderColor: T.ink3 }}>
+                    {DATA_TABS.map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() => {
+                          setDataTab(tab);
+                          setBundle(null);
+                        }}
+                        className="pb-2 text-sm font-semibold"
+                        style={{
+                          fontFamily: FONT_BODY,
+                          color: dataTab === tab ? T.gold : T.muted,
+                          borderBottom: dataTab === tab ? `2px solid ${T.gold}` : "2px solid transparent",
+                        }}
+                      >
+                        {tab}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {DATA_PLANS_BY_TAB[dataTab].map((p) => (
+                      <button
+                        key={p.value}
+                        onClick={() => setBundle(p.value)}
+                        className="rounded-xl p-3 flex flex-col items-center gap-0.5"
+                        style={{ background: T.ink2, border: `1px solid ${bundle === p.value ? T.gold : T.ink3}` }}
+                      >
+                        <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-base font-bold">
+                          {p.label}
+                        </span>
+                        <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-[11px]">
+                          {p.sub}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                    {mode === "electricity" ? "Amount" : "Top up amount"}
+                  </p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {AIRTIME_PRESETS.map((amt) => (
+                      <button
+                        key={amt}
+                        onClick={() => setAmount(String(amt))}
+                        className="rounded-xl py-3 flex flex-col items-center"
+                        style={{ background: T.ink2, border: `1px solid ${Number(amount) === amt ? T.gold : T.ink3}` }}
+                      >
+                        <span style={{ fontFamily: FONT_MONO, color: Number(amount) === amt ? T.gold : T.paper }} className="text-lg font-bold">
+                          {naira(amt)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="number"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Or enter an amount"
+                    className="w-full rounded-xl px-3 py-2.5 text-sm"
+                    style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+                  />
+                </>
+              )}
+
+              <button
+                disabled={!canContinue}
+                onClick={() => setStep("confirm")}
+                className="w-full rounded-2xl py-3 font-semibold text-sm mt-1 transition-transform active:scale-95"
+                style={{ background: canContinue ? T.gold : T.ink2, color: canContinue ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
+              >
+                Continue
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1698,56 +2296,37 @@ function LinkScreen({ email, onLinked, onSkip }) {
 }
 
 /* ---------- Home tab ---------- */
-function HomeTab({ payments, settings, goTab, onUpdate, user, hasBiometricConfirm }) {
+function HomeTab({
+  payments,
+  settings,
+  goTab,
+  onUpdate,
+  user,
+  hasBiometricConfirm,
+  wallet,
+  walletLoading,
+  walletTxns,
+  onWalletChange,
+  onReloadWalletTxns,
+}) {
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [wallet, setWallet] = useState(null);
-  const [walletLoading, setWalletLoading] = useState(true);
-  const [walletTxns, setWalletTxns] = useState([]);
   const [addMoneyOpen, setAddMoneyOpen] = useState(false);
   const [sendMoneyOpen, setSendMoneyOpen] = useState(false);
   const [tapMode, setTapMode] = useState(null); // null | choose | send | receive
   const [walletHistoryOpen, setWalletHistoryOpen] = useState(false);
   const [balanceHidden, setBalanceHidden] = useState(false);
   const [walletReceiptFor, setWalletReceiptFor] = useState(null);
+  const [referralOpen, setReferralOpen] = useState(false);
+  const [billsMode, setBillsMode] = useState(null); // null | "airtime" | "data" | "electricity"
 
   const failedCount = payments.filter((p) => p.status === "failed").length;
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
-  // Wallet balance/activity now live here on Home rather than a separate
-  // tab — dva-get-or-create-wallet attempts the real Paystack DVA call
-  // first and only falls back to a labeled preview account because the
-  // business isn't registered yet.
-  const loadWalletTxns = useCallback(async (walletId) => {
-    const { data } = await supabase
-      .from("dva_wallet_transactions")
-      .select("*")
-      .eq("wallet_id", walletId)
-      .order("created_at", { ascending: false })
-      .limit(100);
-    setWalletTxns(data || []);
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      const { data, error } = await supabase.functions.invoke("dva-get-or-create-wallet", { body: {} });
-      if (!alive) return;
-      if (!error && data?.wallet) {
-        setWallet(data.wallet);
-        loadWalletTxns(data.wallet.id);
-      }
-      setWalletLoading(false);
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [loadWalletTxns]);
-
   function refreshWalletBalance(newBalance) {
-    setWallet((prev) => (prev ? { ...prev, balance: newBalance } : prev));
-    if (wallet) loadWalletTxns(wallet.id);
+    onWalletChange((prev) => (prev ? { ...prev, balance: newBalance } : prev));
+    if (wallet) onReloadWalletTxns(wallet.id);
   }
 
   return (
@@ -1905,37 +2484,69 @@ function HomeTab({ payments, settings, goTab, onUpdate, user, hasBiometricConfir
         </div>
       )}
 
-      <div className="flex gap-3">
-        <button
-          onClick={() => goTab("schedule")}
-          className="flex-1 rounded-2xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
-          style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
-        >
-          <Plus size={16} color={T.gold} />
-          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
-            Schedule payment
-          </span>
-        </button>
-        <button
-          onClick={() => goTab("todo")}
-          className="flex-1 rounded-2xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
-          style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
-        >
-          <CheckSquare size={16} color={T.gold} />
-          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
-            To-do list
-          </span>
-        </button>
-        <button
-          onClick={() => setHistoryOpen(true)}
-          className="flex-1 rounded-2xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
-          style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
-        >
-          <Receipt size={16} color={T.gold} />
-          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
-            Transactions
-          </span>
-        </button>
+      <div className="rounded-2xl p-3" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            onClick={() => goTab("schedule")}
+            className="rounded-xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
+          >
+            <Plus size={16} color={T.gold} />
+            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
+              Schedule
+            </span>
+          </button>
+          <button
+            onClick={() => goTab("todo")}
+            className="rounded-xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
+          >
+            <CheckSquare size={16} color={T.gold} />
+            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
+              To-Do
+            </span>
+          </button>
+          <button
+            onClick={() => setReferralOpen(true)}
+            className="rounded-xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
+          >
+            <Gift size={16} color={T.gold} />
+            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
+              Refer & Earn
+            </span>
+          </button>
+          <button
+            onClick={() => setBillsMode("airtime")}
+            className="rounded-xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
+          >
+            <Smartphone size={16} color={T.gold} />
+            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
+              Airtime
+            </span>
+          </button>
+          <button
+            onClick={() => setBillsMode("data")}
+            className="rounded-xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
+          >
+            <Wifi size={16} color={T.gold} />
+            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
+              Data
+            </span>
+          </button>
+          <button
+            onClick={() => setBillsMode("electricity")}
+            className="rounded-xl py-3 flex flex-col items-center gap-1.5 transition-transform active:scale-95"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}` }}
+          >
+            <Zap size={16} color={T.gold} />
+            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs">
+              Electricity
+            </span>
+          </button>
+        </div>
       </div>
 
       {historyOpen && (
@@ -1988,6 +2599,7 @@ function HomeTab({ payments, settings, goTab, onUpdate, user, hasBiometricConfir
           wallet={wallet}
           hasPin={settings.hasPin}
           hasBiometric={hasBiometricConfirm}
+          myReceiveToken={settings.tapReceiveToken}
           onBack={() => setTapMode("choose")}
           onClose={() => setTapMode(null)}
           onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
@@ -2001,6 +2613,8 @@ function HomeTab({ payments, settings, goTab, onUpdate, user, hasBiometricConfir
           onClaimed={(newBalance) => refreshWalletBalance(newBalance)}
         />
       )}
+      {referralOpen && <ReferralSheet referralCode={settings.referralCode} onClose={() => setReferralOpen(false)} />}
+      {billsMode && <BillsPurchaseSheet mode={billsMode} onClose={() => setBillsMode(null)} />}
     </div>
   );
 }
@@ -2008,6 +2622,7 @@ function HomeTab({ payments, settings, goTab, onUpdate, user, hasBiometricConfir
 // Money in and money out, grouped by day — so "what did I do today" is the
 // first thing visible, with older days below rather than in a separate view.
 function WalletHistorySheet({ transactions, onClose, onSelect }) {
+  useBackClose(onClose);
   const groups = [];
   for (const t of transactions) {
     const day = (t.created_at || "").slice(0, 10);
@@ -2116,6 +2731,7 @@ function WalletHistorySheet({ transactions, onClose, onSelect }) {
 
 
 function TransactionHistorySheet({ payments, senderName, onClose }) {
+  useBackClose(onClose);
   const [receiptFor, setReceiptFor] = useState(null);
   const paid = [...payments].filter((p) => p.status === "paid").sort((a, b) => (b.paid_at || b.date).localeCompare(a.paid_at || a.date));
 
@@ -2172,12 +2788,39 @@ function TransactionHistorySheet({ payments, senderName, onClose }) {
 }
 
 /* ---------- Schedule tab ---------- */
-function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDelete, onRetry, senderName, hasPin, hasBiometric, totalBalance }) {
+function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onDelete, onRetry, onFundSchedule, onRefresh, senderName, hasPin, hasBiometric, wallet }) {
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [fundSheetOpen, setFundSheetOpen] = useState(false);
   const [receiptFor, setReceiptFor] = useState(null);
   const [detailFor, setDetailFor] = useState(null);
   const [detailEditIntent, setDetailEditIntent] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [payingOutId, setPayingOutId] = useState(null);
+  const [executeFor, setExecuteFor] = useState(null);
+  const [balanceHidden, setBalanceHidden] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const scheduleBalance = Number(wallet?.schedule_balance || 0);
+
+  async function handleManualRefresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  // Execute always goes through ExecuteManualRotaSheet — same PIN/biometric
+  // gate every other money-moving action in the app uses, whether or not a
+  // recipient is already on file (a Manual Rota can be created as a pure
+  // proposal with no recipient, collected + verified for the first time here).
+  async function handleExecuteWithRecipient(payment, recipient) {
+    setExecuteFor(null);
+    setPayingOutId(payment.id);
+    await onMarkPaid(payment.id, recipient);
+    setPayingOutId(null);
+  }
   const sorted = [...payments].sort((a, b) => a.date.localeCompare(b.date));
   const today = todayISO();
   const totalBudgeted = payments.reduce((s, p) => s + p.amount, 0);
@@ -2190,47 +2833,79 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
 
   return (
     <div className="px-5 pb-4">
-      <div className="flex items-center justify-start mb-4">
+      <div className="flex items-center justify-between gap-2 mb-4">
         <button
           onClick={() => setSheetOpen(true)}
-          className="rounded-full flex items-center justify-center transition-transform active:scale-90 flex-shrink-0"
-          style={{ width: 40, height: 40, background: T.gold, boxShadow: `0 6px 16px -6px ${T.gold}` }}
+          className="rounded-full flex items-center gap-2 pl-3 pr-4 transition-transform active:scale-95 flex-shrink-0"
+          style={{ height: 40, background: T.gold, boxShadow: `0 6px 16px -6px ${T.gold}` }}
         >
-          <Plus size={19} color={T.ink2} />
+          <Plus size={18} color={T.ink2} />
+          <span style={{ fontFamily: FONT_BODY, color: T.ink2 }} className="text-sm font-semibold">
+            Schedule Payment
+          </span>
+        </button>
+        <button
+          onClick={() => setFundSheetOpen(true)}
+          className="rounded-full flex items-center gap-2 pl-3 pr-4 transition-transform active:scale-95 flex-shrink-0"
+          style={{ height: 40, background: T.ink2, border: `1px solid ${T.ink3}` }}
+        >
+          <Wallet size={16} color={T.gold} />
+          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-semibold">
+            Add Funds
+          </span>
         </button>
       </div>
 
-      {payments.length > 0 && (
-        <div className="rounded-2xl p-4 mb-4" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-          <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-3">
-            This month
-          </p>
-          <div className="flex items-end justify-between mb-3">
-            <div>
-              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-0.5">
-                Spent so far
-              </p>
-              <span style={{ fontFamily: FONT_MONO, color: T.ok }} className="text-lg font-semibold">
-                {naira(totalPaid)}
-              </span>
-            </div>
-            <div className="text-right">
-              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-0.5">
-                Total budget
-              </p>
-              <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-lg font-semibold">
-                {naira(totalBudgeted)}
-              </span>
-            </div>
-          </div>
-          <div className="rounded-full overflow-hidden mb-1" style={{ height: 8, background: T.ink3 }}>
-            <div className="h-full rounded-full" style={{ width: `${pct}%`, background: T.gold }} />
-          </div>
-          <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
-            {pct}% paid out — {naira(Math.max(0, totalBudgeted - totalPaid))} left to go
+      <div className="rota-sticky-card rounded-2xl p-4 mb-4" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="flex items-center gap-1.5" style={{ fontFamily: FONT_BODY, color: T.muted }}>
+            <span className="text-xs">Schedule Balance</span>
+            <BalanceEyeToggle hidden={balanceHidden} onToggle={() => setBalanceHidden((v) => !v)} />
           </span>
+          <button
+            onClick={handleManualRefresh}
+            disabled={refreshing}
+            aria-label="Refresh"
+            className="flex items-center justify-center flex-shrink-0"
+            style={{ width: 26, height: 26, background: "none", border: "none" }}
+          >
+            <RotateCcw size={14} color={T.muted} className={refreshing ? "animate-spin" : ""} />
+          </button>
         </div>
-      )}
+        <div style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-2xl font-semibold mb-4">
+          {balanceHidden ? "₦ • • • • • •" : naira(scheduleBalance)}
+        </div>
+
+        <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-3">
+          This month
+        </p>
+        <div className="flex items-end justify-between mb-3 gap-2">
+          <div>
+            <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-0.5">
+              Spent so far
+            </p>
+            <span style={{ fontFamily: FONT_MONO, color: T.ok }} className="text-lg font-semibold">
+              {naira(totalPaid)}
+            </span>
+          </div>
+          <div className="text-right">
+            <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs mb-0.5">
+              Total budget
+            </p>
+            <span style={{ fontFamily: FONT_MONO, color: T.paper }} className="text-lg font-semibold">
+              {naira(totalBudgeted)}
+            </span>
+          </div>
+        </div>
+        <div className="rounded-full overflow-hidden mb-1" style={{ height: 8, background: T.ink3 }}>
+          <div className="h-full rounded-full" style={{ width: `${pct}%`, background: T.gold }} />
+        </div>
+        <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+          {payments.length === 0
+            ? "Tap Schedule Payment to add your first one and start tracking your budget"
+            : `${pct}% paid out — ${naira(Math.max(0, totalBudgeted - totalPaid))} left to go`}
+        </span>
+      </div>
 
       {recentPaid.length > 0 && (
         <div className="mb-4">
@@ -2351,7 +3026,7 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
                     {naira(p.amount)}
                   </span>
                 </div>
-                {p.status === "failed" && p.charge_error && (
+                {p.status !== "paid" && p.charge_error && (
                   <p className="text-xs mt-1.5" style={{ color: T.warn, fontFamily: FONT_BODY }}>
                     {p.charge_error}
                   </p>
@@ -2369,27 +3044,23 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
                       >
                         <Receipt size={12} /> Receipt
                       </button>
-                      {!isAutomatic && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); onUnmarkPaid(p.id); }}
-                          className="text-xs font-medium"
-                          style={{ color: T.muted, fontFamily: FONT_BODY }}
-                        >
-                          Unmark
-                        </button>
-                      )}
                     </div>
                   ) : p.status === "failed" ? (
                     <button onClick={(e) => { e.stopPropagation(); onRetry(p.id); }} className="text-xs font-medium" style={{ color: T.warn, fontFamily: FONT_BODY }}>
-                      {isAutomatic ? "Transfer failed — Retry" : "Charge failed — Retry"}
+                      Payment failed — Retry
                     </button>
                   ) : isAutomatic ? (
                     <span className="flex items-center gap-1 text-xs" style={{ color: T.blue, fontFamily: FONT_BODY }}>
                       <Clock size={11} /> Runs automatically
                     </span>
                   ) : (
-                    <button onClick={(e) => { e.stopPropagation(); onMarkPaid(p.id); }} className="text-xs font-medium" style={{ color: T.gold, fontFamily: FONT_BODY }}>
-                      Mark as paid
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setExecuteFor(p); }}
+                      disabled={payingOutId === p.id}
+                      className="text-xs font-medium"
+                      style={{ color: payingOutId === p.id ? T.muted : T.gold, fontFamily: FONT_BODY }}
+                    >
+                      {payingOutId === p.id ? "Executing…" : "Execute"}
                     </button>
                   )}
                   <div className="flex items-center gap-3">
@@ -2417,8 +3088,25 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
           onSave={(p) => { onAdd(p); setSheetOpen(false); }}
           hasPin={hasPin}
           hasBiometric={hasBiometric}
-          totalBalance={totalBalance}
+          scheduleBalance={scheduleBalance}
           currentlyScheduled={payments.reduce((s, p) => s + p.amount, 0)}
+        />
+      )}
+      {fundSheetOpen && (
+        <FundScheduleSheet
+          onClose={() => setFundSheetOpen(false)}
+          onFund={onFundSchedule}
+          hasPin={hasPin}
+          hasBiometric={hasBiometric}
+          homeBalance={Number(wallet?.balance || 0)}
+        />
+      )}
+      {executeFor && (
+        <ExecuteManualRotaSheet
+          payment={executeFor}
+          hasBiometric={hasBiometric}
+          onClose={() => setExecuteFor(null)}
+          onExecute={(recipient) => handleExecuteWithRecipient(executeFor, recipient)}
         />
       )}
       {receiptFor && <ReceiptSheet payment={receiptFor} senderName={senderName} onClose={() => setReceiptFor(null)} />}
@@ -2444,9 +3132,350 @@ function ScheduleTab({ payments, onAdd, onEdit, onMarkPaid, onUnmarkPaid, onDele
   );
 }
 
+function FundScheduleSheet({ onClose, onFund, hasPin, hasBiometric, homeBalance }) {
+  useBackClose(onClose);
+  const [source, setSource] = useState("home");
+  const [amount, setAmount] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const canSave = Number(amount) > 0 && hasPin && !submitting;
+
+  async function submit() {
+    setSubmitting(true);
+    setError("");
+    const result = await onFund(source, Number(amount));
+    setSubmitting(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    onClose();
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 22 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "80vh" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            Fund Schedule Balance
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-3">
+          <div>
+            <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+              Source
+            </label>
+            <div className="flex rounded-xl p-1" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+              {[
+                { key: "home", label: "Home balance" },
+                { key: "card", label: "Linked card" },
+              ].map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => setSource(opt.key)}
+                  className="flex-1 rounded-lg py-2 text-xs font-semibold transition-colors"
+                  style={{
+                    fontFamily: FONT_BODY,
+                    background: source === opt.key ? T.gold : "transparent",
+                    color: source === opt.key ? T.ink2 : T.muted,
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs mt-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              {source === "home"
+                ? `Moves money you already have on Home into Schedule Balance — instant, no card involved. Home balance: ${naira(homeBalance)}.`
+                : "Charges your linked card directly into Schedule Balance — Home's balance isn't touched."}
+            </p>
+          </div>
+          <div>
+            <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+              Amount (₦)
+            </label>
+            <input
+              type="number"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
+              className="w-full rounded-xl px-3 py-2.5 text-sm"
+              style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+            />
+          </div>
+          {!hasPin && (
+            <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+              Set a transaction PIN in Profile → Settings before funding Schedule Balance.
+            </p>
+          )}
+          {error && (
+            <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+              {error}
+            </p>
+          )}
+          <button
+            disabled={!canSave}
+            onClick={() => setConfirming(true)}
+            className="w-full rounded-2xl py-3 font-semibold text-sm mt-1 transition-transform active:scale-95"
+            style={{ background: canSave ? T.gold : T.ink3, color: canSave ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
+          >
+            {submitting ? "Funding…" : "Fund Schedule Balance"}
+          </button>
+        </div>
+      </div>
+      {confirming && (
+        <ConfirmSheet
+          hasBiometric={hasBiometric}
+          onClose={() => setConfirming(false)}
+          onConfirmed={() => {
+            setConfirming(false);
+            submit();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Manual Rotas can be created as a pure proposal with no recipient — this is
+// where one gets collected and verified for the first time (or re-shown,
+// already filled in, if one's already on file), gated behind the same PIN
+// confirmation every other money-moving action in the app uses before the
+// real Schedule Balance payout actually fires.
+function ExecuteManualRotaSheet({ payment, hasBiometric, onClose, onExecute }) {
+  useBackClose(onClose);
+  const [banks, setBanks] = useState(cachedBanks || []);
+  const [banksLoading, setBanksLoading] = useState(!cachedBanks);
+  const [banksError, setBanksError] = useState("");
+  const [bankCode, setBankCode] = useState(payment.recipient_bank_code || "");
+  const [accountNumber, setAccountNumber] = useState(payment.recipient_account_number || "");
+  const [resolvedName, setResolvedName] = useState(payment.recipient_account_name || "");
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState("");
+  const [detecting, setDetecting] = useState(false);
+  const [detectMatches, setDetectMatches] = useState([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const autoDetectedKeyRef = useRef(
+    payment.recipient_account_number ? `${payment.recipient_account_number}:${payment.recipient_bank_code}` : ""
+  );
+
+  useEffect(() => {
+    if (cachedBanks) return;
+    let alive = true;
+    supabase.functions.invoke("list-banks", { body: {} }).then(({ data, error }) => {
+      if (!alive) return;
+      if (error || !data?.banks) {
+        setBanksError("Couldn't load the bank list.");
+      } else {
+        cachedBanks = data.banks;
+        setBanks(data.banks);
+      }
+      setBanksLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setResolveError("");
+    setDetectMatches([]);
+    if (accountNumber.length !== 10) {
+      setResolvedName("");
+      return;
+    }
+    if (bankCode) {
+      const key = `${accountNumber}:${bankCode}`;
+      if (autoDetectedKeyRef.current === key) return;
+      setResolvedName("");
+      setResolving(true);
+      const handle = setTimeout(async () => {
+        const { data, error } = await supabase.functions.invoke("resolve-account", {
+          body: { account_number: accountNumber, bank_code: bankCode },
+        });
+        if (error || !data?.account_name) {
+          setResolveError((data && data.error) || "Couldn't verify that account.");
+        } else {
+          setResolvedName(data.account_name);
+        }
+        setResolving(false);
+      }, 500);
+      return () => clearTimeout(handle);
+    }
+    setResolvedName("");
+    setDetecting(true);
+    supabase.functions.invoke("detect-bank", { body: { account_number: accountNumber } }).then(({ data, error }) => {
+      setDetecting(false);
+      if (error || !data?.matches || data.matches.length === 0) return;
+      if (data.matches.length === 1) {
+        const m = data.matches[0];
+        autoDetectedKeyRef.current = `${accountNumber}:${m.bank_code}`;
+        setBankCode(m.bank_code);
+        setResolvedName(m.account_name);
+      } else {
+        setDetectMatches(data.matches);
+      }
+    });
+  }, [accountNumber, bankCode]);
+
+  const bankName = banks.find((b) => b.code === bankCode)?.name || payment.recipient_bank_name || "";
+  const recipientReady = bankCode && accountNumber.length === 10 && resolvedName;
+
+  function pickBank(bank) {
+    autoDetectedKeyRef.current = "";
+    setBankCode(bank.code);
+    setPickerOpen(false);
+  }
+
+  function pickDetectedMatch(match) {
+    autoDetectedKeyRef.current = `${accountNumber}:${match.bank_code}`;
+    setBankCode(match.bank_code);
+    setResolvedName(match.account_name);
+    setDetectMatches([]);
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 24 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 overflow-y-auto max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, maxHeight: "85vh" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            Execute — {payment.name}
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+        <p className="text-xs mb-3" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+          Pays {naira(payment.amount)} from your Schedule Balance to the recipient below.
+        </p>
+        <div className="flex flex-col gap-3">
+          <div>
+            <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+              Account number
+            </label>
+            <input
+              value={accountNumber}
+              onChange={(e) => {
+                setAccountNumber(e.target.value.replace(/\D/g, "").slice(0, 10));
+                autoDetectedKeyRef.current = "";
+              }}
+              placeholder="10-digit account number"
+              inputMode="numeric"
+              className="w-full rounded-xl px-3 py-2.5 text-sm"
+              style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+            />
+          </div>
+
+          {detecting && (
+            <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              <Loader2 size={12} className="animate-spin" /> Detecting bank...
+            </p>
+          )}
+
+          {detectMatches.length > 1 && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-xs" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                Found more than one match — which is it?
+              </p>
+              {detectMatches.map((m) => (
+                <button
+                  key={m.bank_code}
+                  onClick={() => pickDetectedMatch(m)}
+                  className="text-left rounded-xl px-3 py-2 text-xs flex items-center gap-2"
+                  style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+                >
+                  <BankMonogram name={m.bank_name} size={20} />
+                  {m.bank_name} — {m.account_name}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div>
+            <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+              Bank
+            </label>
+            <button
+              onClick={() => setPickerOpen(true)}
+              disabled={banksLoading}
+              className="w-full rounded-xl px-3 py-2.5 text-sm flex items-center justify-between"
+              style={{ background: T.ink, border: `1px solid ${T.ink3}`, fontFamily: FONT_BODY }}
+            >
+              <span className="flex items-center gap-2 min-w-0">
+                {bankName && <BankMonogram name={bankName} />}
+                <span className="truncate" style={{ color: bankName ? T.paper : T.muted }}>
+                  {bankName || (banksLoading ? "Loading banks..." : "Tap to select bank")}
+                </span>
+              </span>
+              <ChevronDown size={14} color={T.muted} style={{ flexShrink: 0 }} />
+            </button>
+            {banksError && (
+              <p className="text-xs mt-1" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                {banksError}
+              </p>
+            )}
+          </div>
+
+          {resolving && (
+            <p className="text-xs flex items-center gap-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              <Loader2 size={12} className="animate-spin" /> Verifying account...
+            </p>
+          )}
+          {resolvedName && (
+            <p className="text-xs flex items-center gap-1.5" style={{ color: T.ok, fontFamily: FONT_BODY }}>
+              <Check size={12} /> {resolvedName}
+            </p>
+          )}
+          {resolveError && (
+            <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+              {resolveError}
+            </p>
+          )}
+
+          <button
+            disabled={!recipientReady}
+            onClick={() => setConfirming(true)}
+            className="w-full rounded-2xl py-3 font-semibold text-sm mt-1 transition-transform active:scale-95"
+            style={{ background: recipientReady ? T.gold : T.ink3, color: recipientReady ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
+          >
+            {recipientReady ? "Confirm & Execute" : "Verify recipient to continue"}
+          </button>
+        </div>
+      </div>
+      {pickerOpen && (
+        <BankPicker banks={banks} banksLoading={banksLoading} value={bankCode} onSelect={pickBank} onClose={() => setPickerOpen(false)} />
+      )}
+      {confirming && (
+        <ConfirmSheet
+          hasBiometric={hasBiometric}
+          onClose={() => setConfirming(false)}
+          onConfirmed={() => {
+            setConfirming(false);
+            onExecute({
+              recipient_bank_code: bankCode,
+              recipient_bank_name: bankName,
+              recipient_account_number: accountNumber,
+              recipient_account_name: resolvedName,
+            });
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 let cachedBanks = null;
 
 function ScheduleDetailSheet({ payment, onClose, onSave, startEditing = false }) {
+  useBackClose(onClose);
   const canEdit = payment.status === "upcoming";
   const [editing, setEditing] = useState(startEditing);
   const [name, setName] = useState(payment.name);
@@ -2669,7 +3698,8 @@ function BankMonogram({ name, size = 22 }) {
   );
 }
 
-function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, totalBalance, currentlyScheduled }) {
+function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, scheduleBalance, currentlyScheduled }) {
+  useBackClose(onClose);
   const [rotaType, setRotaType] = useState("manual");
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
@@ -2759,7 +3789,7 @@ function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, totalBalance, 
   const recipientReady = bankCode && accountNumber.length === 10 && resolvedName;
   const canSave = name.trim().length > 0 && Number(amount) > 0 && date && (rotaType === "manual" || recipientReady) && hasPin;
   const projectedTotal = (currentlyScheduled || 0) + (Number(amount) || 0);
-  const wouldExceedBalance = totalBalance > 0 && projectedTotal > totalBalance;
+  const wouldExceedBalance = scheduleBalance > 0 && projectedTotal > scheduleBalance;
 
   function pickBank(bank) {
     autoDetectedKeyRef.current = "";
@@ -2829,8 +3859,8 @@ function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, totalBalance, 
             </div>
             <p className="text-xs mt-1.5" style={{ color: T.muted, fontFamily: FONT_BODY }}>
               {rotaType === "automatic"
-                ? "Rota charges your card and sends the money to the account below on the due date, automatically."
-                : "Rota reminds you on the due date. You send the money yourself, then mark it paid."}
+                ? "Rota verifies the recipient now and pays them from your Schedule Balance automatically on the due date."
+                : "Add the recipient whenever you're ready — verify and pay from your Schedule Balance then."}
             </p>
           </div>
 
@@ -3005,7 +4035,7 @@ function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, totalBalance, 
           )}
           {wouldExceedBalance && (
             <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
-              This would put your scheduled Rotas {naira(projectedTotal - totalBalance)} over your total balance.
+              This would put your scheduled Rotas {naira(projectedTotal - scheduleBalance)} over your Schedule Balance.
               You can still save it — just a heads up.
             </p>
           )}
@@ -3037,6 +4067,7 @@ function AddPaymentSheet({ onClose, onSave, hasPin, hasBiometric, totalBalance, 
 }
 
 function BankPicker({ banks, banksLoading, value, onSelect, onClose }) {
+  useBackClose(onClose);
   const [query, setQuery] = useState("");
   const filtered = query.trim() ? banks.filter((b) => b.name.toLowerCase().includes(query.trim().toLowerCase())) : banks;
 
@@ -3096,117 +4127,189 @@ function BankPicker({ banks, banksLoading, value, onSelect, onClose }) {
 }
 
 /* ---------- Receipt sheet ---------- */
-function ReceiptSheet({ payment, senderName, onClose }) {
+// Shared by ReceiptSheet and WalletReceiptSheet — draws a branded receipt
+// card to an offscreen canvas and returns it as a PNG blob, styled after
+// OPay/PalmPay/Moniepoint's receipts: a colored header banner, a white card
+// floating over it with a status pill, a big colored amount, a prominent
+// two-line counterparty block, then plain detail rows.
+async function buildBrandedReceiptImage({ statusLabel, amountText, amountColor, primaryLabel, primaryName, primarySubline, metaRows }) {
+  await document.fonts.ready.catch(() => {});
+  const W = 720;
+  const HEADER_H = 152;
+  const CARD_TOP = 112;
+  const rowH = 52;
+  const primaryBlockH = primarySubline ? 92 : 70;
+  const H = CARD_TOP + 210 + primaryBlockH + metaRows.length * rowH + 90;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  function roundedRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // Page background
+  ctx.fillStyle = "#EDE4D3";
+  ctx.fillRect(0, 0, W, H);
+
+  // Colored header banner with the Rota mark
+  ctx.fillStyle = "#8B5CF6";
+  ctx.fillRect(0, 0, W, HEADER_H);
+  const logo = await loadLogoImage();
+  if (logo) {
+    ctx.drawImage(logo, 48, HEADER_H / 2 - 30, 60, 60);
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = "700 42px Fredoka, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("rota", 48 + 60 + 16, HEADER_H / 2 + 2);
+  } else {
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = "700 42px Fredoka, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("rota", 48, HEADER_H / 2 + 2);
+  }
+  ctx.textAlign = "right";
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  ctx.font = "600 15px Nunito, sans-serif";
+  ctx.fillText("Transaction Receipt", W - 48, HEADER_H / 2 + 2);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+
+  // White card floating over the banner
+  ctx.fillStyle = "#FFFFFF";
+  roundedRect(32, CARD_TOP, W - 64, H - CARD_TOP - 32, 24);
+  ctx.fill();
+
+  let y = CARD_TOP + 56;
+
+  // Status pill
+  const pillText = statusLabel;
+  ctx.font = "700 14px Nunito, sans-serif";
+  const pillTextW = ctx.measureText(pillText.toUpperCase()).width;
+  const pillW = pillTextW + 46;
+  ctx.fillStyle = "rgba(31,194,139,0.14)";
+  roundedRect(48, y - 24, pillW, 34, 17);
+  ctx.fill();
+  ctx.fillStyle = "#1FC28B";
+  ctx.beginPath();
+  ctx.arc(48 + 17, y - 7, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(48 + 14, y - 7);
+  ctx.lineTo(48 + 16.5, y - 4.5);
+  ctx.lineTo(48 + 21, y - 10);
+  ctx.strokeStyle = "#FFFFFF";
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  ctx.fillStyle = "#1FC28B";
+  ctx.font = "700 14px Nunito, sans-serif";
+  ctx.fillText(pillText.toUpperCase(), 48 + 32, y - 2);
+
+  y += 68;
+  ctx.fillStyle = amountColor;
+  ctx.font = "700 52px 'IBM Plex Mono', monospace";
+  ctx.fillText(amountText, 48, y);
+
+  y += 40;
+  ctx.strokeStyle = "#EDE4D3";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(48, y);
+  ctx.lineTo(W - 48, y);
+  ctx.stroke();
+
+  // Primary counterparty block — bold name, muted detail line beneath
+  y += 40;
+  ctx.fillStyle = "#9C927F";
+  ctx.font = "600 13px Nunito, sans-serif";
+  ctx.fillText(primaryLabel.toUpperCase(), 48, y);
+  y += 28;
+  ctx.fillStyle = "#2E2A22";
+  ctx.font = "700 22px Nunito, sans-serif";
+  ctx.fillText(primaryName, 48, y);
+  if (primarySubline) {
+    y += 26;
+    ctx.fillStyle = "#9C927F";
+    ctx.font = "500 15px Nunito, sans-serif";
+    ctx.fillText(primarySubline, 48, y);
+  }
+
+  y += 34;
+  ctx.strokeStyle = "#EDE4D3";
+  ctx.beginPath();
+  ctx.moveTo(48, y);
+  ctx.lineTo(W - 48, y);
+  ctx.stroke();
+
+  y += 44;
+  for (const [label, value] of metaRows) {
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#9C927F";
+    ctx.font = "500 16px Nunito, sans-serif";
+    ctx.fillText(label, 48, y);
+
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#2E2A22";
+    ctx.font = "600 16px Nunito, sans-serif";
+    ctx.fillText(String(value), W - 48, y);
+    y += rowH;
+  }
+  ctx.textAlign = "left";
+
+  y += 4;
+  ctx.strokeStyle = "#EDE4D3";
+  ctx.beginPath();
+  ctx.moveTo(48, y);
+  ctx.lineTo(W - 48, y);
+  ctx.stroke();
+
+  y += 38;
+  ctx.fillStyle = "#9C927F";
+  ctx.font = "italic 14px Nunito, sans-serif";
+  ctx.fillText("Money, on schedule. — Rota", 48, y);
+
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 0.95));
+}
+
+// The full receipt sheet UI, shared by ReceiptSheet and WalletReceiptSheet —
+// both just compute the props below from their own data shape (a scheduled
+// payment vs. a wallet transaction) and render this.
+function ReceiptCardSheet({ statusLabel, statusIcon, amountText, amountColor, primaryLabel, primaryName, primarySubline, metaRows, copyLines, fileName, onClose }) {
+  useBackClose(onClose);
   const [shareState, setShareState] = useState("idle"); // idle | generating | copied
   const [imgError, setImgError] = useState("");
-
-  const rows = [
-    ["Amount", naira(payment.amount)],
-    ["From", senderName],
-    payment.recipient_account_name ? ["To", payment.recipient_account_name] : null,
-    payment.recipient_account_number
-      ? ["Account", `${payment.recipient_account_number} · ${payment.recipient_bank_name || "—"}`]
-      : null,
-    ["For", `${payment.name} (${payment.category})`],
-    ["Type", payment.rota_type === "automatic" ? "Automatic Rota" : "Manual Rota"],
-    ["Date", payment.paid_at ? new Date(payment.paid_at).toLocaleString("en-NG") : payment.date],
-    ["Reference", payment.transaction_ref || "—"],
-  ].filter(Boolean);
-  const listRows = rows.filter(([label]) => label !== "Amount");
-
-  // Draws a branded receipt card to an offscreen canvas and returns it as a PNG blob —
-  // this is the actual "shareable image" (like OPay/Kuda's receipt cards), not just text.
-  async function buildReceiptImage() {
-    await document.fonts.ready.catch(() => {});
-    const W = 720;
-    const rowH = 54;
-    const H = 400 + listRows.length * rowH;
-    const canvas = document.createElement("canvas");
-    canvas.width = W;
-    canvas.height = H;
-    const ctx = canvas.getContext("2d");
-
-    ctx.fillStyle = "#FBF8F2";
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = "#8B5CF6";
-    ctx.fillRect(0, 0, W, 12);
-
-    let y = 74;
-    const logo = await loadLogoImage();
-    if (logo) {
-      ctx.drawImage(logo, 48, y - 38, 40, 40);
-      ctx.fillStyle = "#2E2A22";
-      ctx.font = "600 30px Fredoka, sans-serif";
-      ctx.fillText("rota", 48 + 40 + 14, y);
-    } else {
-      ctx.fillStyle = "#2E2A22";
-      ctx.font = "600 32px Fredoka, sans-serif";
-      ctx.fillText("rota", 48, y);
-    }
-
-    y += 34;
-    ctx.fillStyle = "#9C927F";
-    ctx.font = "600 15px Nunito, sans-serif";
-    ctx.fillText("PAYMENT SUCCESSFUL", 48, y);
-
-    y += 72;
-    ctx.fillStyle = "#2E2A22";
-    ctx.font = "600 50px 'IBM Plex Mono', monospace";
-    ctx.fillText(naira(payment.amount), 48, y);
-
-    y += 38;
-    ctx.strokeStyle = "#EDE4D3";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(48, y);
-    ctx.lineTo(W - 48, y);
-    ctx.stroke();
-
-    y += 44;
-    for (const [label, value] of listRows) {
-      ctx.textAlign = "left";
-      ctx.fillStyle = "#9C927F";
-      ctx.font = "500 16px Nunito, sans-serif";
-      ctx.fillText(label, 48, y);
-
-      ctx.textAlign = "right";
-      ctx.fillStyle = "#2E2A22";
-      ctx.font = "600 16px Nunito, sans-serif";
-      ctx.fillText(String(value), W - 48, y);
-      y += rowH;
-    }
-    ctx.textAlign = "left";
-
-    y += 6;
-    ctx.strokeStyle = "#EDE4D3";
-    ctx.beginPath();
-    ctx.moveTo(48, y);
-    ctx.lineTo(W - 48, y);
-    ctx.stroke();
-
-    y += 42;
-    ctx.fillStyle = "#9C927F";
-    ctx.font = "italic 14px Nunito, sans-serif";
-    ctx.fillText("Money, on schedule. — Rota", 48, y);
-
-    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 0.95));
-  }
 
   async function shareImage() {
     setShareState("generating");
     setImgError("");
     try {
-      const blob = await buildReceiptImage();
+      const blob = await buildBrandedReceiptImage({ statusLabel, amountText, amountColor, primaryLabel, primaryName, primarySubline, metaRows });
       if (!blob) throw new Error("Could not render image");
-      const file = new File([blob], `rota-receipt-${payment.id || Date.now()}.png`, { type: "image/png" });
 
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: "Rota receipt" });
+      if (IS_NATIVE) {
+        // The Web Share API (navigator.share/canShare) isn't implemented in
+        // Android's WebView the way it is in a real browser, so this was
+        // silently falling through to a download-link click that Capacitor's
+        // WebView also doesn't handle — nothing visibly happened either way.
+        // Writing the file natively and handing it to the native Share
+        // sheet is the reliable path.
+        const base64 = await blobToBase64(blob);
+        const written = await Filesystem.writeFile({ path: fileName, data: base64, directory: Directory.Cache });
+        await Share.share({ title: "Rota receipt", url: written.uri });
+      } else if (navigator.canShare && navigator.canShare({ files: [new File([blob], fileName, { type: "image/png" })] })) {
+        await navigator.share({ files: [new File([blob], fileName, { type: "image/png" })], title: "Rota receipt" });
       } else {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = file.name;
+        a.download = fileName;
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -3220,9 +4323,8 @@ function ReceiptSheet({ payment, senderName, onClose }) {
   }
 
   async function copyText() {
-    const text = [`Rota payment receipt`, ...rows.map(([l, v]) => `${l}: ${v}`)].join("\n");
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(copyLines.join("\n"));
       setShareState("copied");
       setTimeout(() => setShareState("idle"), 1500);
     } catch {
@@ -3233,247 +4335,152 @@ function ReceiptSheet({ payment, senderName, onClose }) {
   return (
     <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 25 }}>
       <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
-            Receipt
-          </h3>
-          <button onClick={onClose}>
-            <X size={18} color={T.muted} />
+      <div className="relative rounded-t-3xl max-w-lg mx-auto w-full overflow-hidden" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="relative px-5 pt-11 pb-9" style={{ background: T.gold }}>
+          <button onClick={onClose} className="absolute top-4 right-4">
+            <X size={18} color="#FFFFFF" style={{ opacity: 0.85 }} />
           </button>
-        </div>
-
-        <div className="rounded-2xl p-4 mb-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
-          <div className="flex items-center gap-2 mb-3">
-            <div className="rounded-full flex items-center justify-center" style={{ width: 30, height: 30, background: T.ok }}>
-              <Check size={16} color={T.ink} />
-            </div>
-            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-medium">
-              Payment successful
+          <div className="flex items-center gap-3">
+            <RotaMark size={44} />
+            <span style={{ fontFamily: FONT_DISPLAY, color: "#FFFFFF" }} className="text-2xl font-semibold">
+              rota
             </span>
           </div>
-          <div className="flex flex-col gap-2">
-            <ReceiptRow label="Amount" value={naira(payment.amount)} mono />
-            <ReceiptRow label="From" value={senderName} />
-            {payment.recipient_account_name && <ReceiptRow label="To" value={payment.recipient_account_name} />}
-            {payment.recipient_account_number && (
-              <ReceiptRow label="Account" value={`${payment.recipient_account_number} · ${payment.recipient_bank_name || "—"}`} mono />
-            )}
-            <ReceiptRow label="For" value={`${payment.name} (${payment.category})`} />
-            <ReceiptRow label="Type" value={payment.rota_type === "automatic" ? "Automatic Rota" : "Manual Rota"} />
-            <ReceiptRow
-              label="Date"
-              value={payment.paid_at ? new Date(payment.paid_at).toLocaleString("en-NG") : payment.date}
-            />
-            <ReceiptRow label="Reference" value={payment.transaction_ref || "—"} mono />
+        </div>
+
+        <div className="relative px-5 pb-5" style={{ marginTop: -22 }}>
+          <div className="rounded-3xl p-5" style={{ background: T.ink2, border: `1px solid ${T.ink3}`, boxShadow: "0 -8px 24px -12px rgba(0,0,0,0.15)" }}>
+            <div
+              className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 mb-4"
+              style={{ background: `${T.ok}24` }}
+            >
+              {statusIcon}
+              <span style={{ fontFamily: FONT_BODY, color: T.ok }} className="text-xs font-bold uppercase tracking-wide">
+                {statusLabel}
+              </span>
+            </div>
+
+            <div style={{ fontFamily: FONT_MONO, color: amountColor }} className="text-4xl font-bold mb-5">
+              {amountText}
+            </div>
+
+            <div className="h-px mb-4" style={{ background: T.ink3 }} />
+
+            <div className="mb-4">
+              <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-[11px] font-semibold uppercase tracking-wide mb-1.5">
+                {primaryLabel}
+              </p>
+              <p style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-lg font-bold leading-tight">
+                {primaryName}
+              </p>
+              {primarySubline && (
+                <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm mt-0.5">
+                  {primarySubline}
+                </p>
+              )}
+            </div>
+
+            <div className="h-px mb-4" style={{ background: T.ink3 }} />
+
+            <div className="flex flex-col gap-2.5">
+              {metaRows.map(([label, value]) => (
+                <ReceiptRow key={label} label={label} value={value} mono={label === "Reference" || label === "Transaction ID"} />
+              ))}
+            </div>
           </div>
         </div>
 
-        {imgError && (
-          <p className="text-xs mb-2 text-center" style={{ color: T.warn, fontFamily: FONT_BODY }}>
-            {imgError}
-          </p>
-        )}
-        <button
-          onClick={shareImage}
-          disabled={shareState === "generating"}
-          className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 mb-2"
-          style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
-        >
-          {shareState === "generating" ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />}
-          {shareState === "generating" ? "Preparing image..." : "Share as image"}
-        </button>
-        <button onClick={copyText} className="w-full text-center text-xs py-1" style={{ color: T.muted, fontFamily: FONT_BODY }}>
-          {shareState === "copied" ? "Copied to clipboard" : "Copy as text instead"}
-        </button>
+        <div className="px-5 pb-5">
+          {imgError && (
+            <p className="text-xs mb-2 text-center" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+              {imgError}
+            </p>
+          )}
+          <button
+            onClick={shareImage}
+            disabled={shareState === "generating"}
+            className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 mb-2"
+            style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY, boxShadow: `0 10px 24px -10px ${T.gold}` }}
+          >
+            {shareState === "generating" ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />}
+            {shareState === "generating" ? "Preparing image..." : "Share receipt"}
+          </button>
+          <button onClick={copyText} className="w-full text-center text-xs py-1" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+            {shareState === "copied" ? "Copied to clipboard" : "Copy as text instead"}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-// Same branded, shareable receipt card as ReceiptSheet, but for a wallet
-// transaction (dva_wallet_transactions row) rather than a scheduled payment
-// — different shape, same visual design.
-function WalletReceiptSheet({ txn, onClose }) {
-  const [shareState, setShareState] = useState("idle");
-  const [imgError, setImgError] = useState("");
-  const isCredit = txn.type === "credit";
+function ReceiptSheet({ payment, senderName, onClose }) {
+  useBackClose(onClose);
+  const metaRows = [
+    ["From", senderName],
+    ["For", `${payment.name} (${payment.category})`],
+    ["Type", payment.rota_type === "automatic" ? "Automatic Rota" : "Manual Rota"],
+    ["Date", payment.paid_at ? new Date(payment.paid_at).toLocaleString("en-NG") : payment.date],
+    ["Reference", payment.transaction_ref || "—"],
+  ];
+  const primarySubline = payment.recipient_account_number
+    ? `${payment.recipient_account_number} · ${payment.recipient_bank_name || "—"}`
+    : null;
 
-  const rows = [
-    ["Amount", naira(txn.amount)],
-    [
-      isCredit ? "From" : "To",
-      txn.counterparty_name || (isCredit ? "Bank transfer" : "Recipient"),
-    ],
-    txn.counterparty_bank ? ["Bank", txn.counterparty_bank] : null,
+  return (
+    <ReceiptCardSheet
+      statusLabel="Payment successful"
+      statusIcon={<Check size={13} color={T.ok} />}
+      amountText={naira(payment.amount)}
+      amountColor={T.paper}
+      primaryLabel="Paid to"
+      primaryName={payment.recipient_account_name || payment.name}
+      primarySubline={primarySubline}
+      metaRows={metaRows}
+      copyLines={[
+        "Rota payment receipt",
+        `Amount: ${naira(payment.amount)}`,
+        `Paid to: ${payment.recipient_account_name || payment.name}`,
+        ...(primarySubline ? [`Account: ${primarySubline}`] : []),
+        ...metaRows.map(([l, v]) => `${l}: ${v}`),
+      ]}
+      fileName={`rota-receipt-${payment.id || Date.now()}.png`}
+      onClose={onClose}
+    />
+  );
+}
+
+// Same shared receipt design as ReceiptSheet, but for a wallet transaction
+// (dva_wallet_transactions row) rather than a scheduled payment.
+function WalletReceiptSheet({ txn, onClose }) {
+  useBackClose(onClose);
+  const isCredit = txn.type === "credit";
+  const metaRows = [
+    ["Type", isCredit ? "Credit" : "Debit"],
     txn.description ? ["Description", txn.description] : null,
     ["Date", txn.created_at ? new Date(txn.created_at).toLocaleString("en-NG") : "—"],
     ["Reference", txn.id ? String(txn.id).slice(0, 12) : "—"],
   ].filter(Boolean);
-  const listRows = rows.filter(([label]) => label !== "Amount");
-
-  async function buildReceiptImage() {
-    await document.fonts.ready.catch(() => {});
-    const W = 720;
-    const rowH = 54;
-    const H = 400 + listRows.length * rowH;
-    const canvas = document.createElement("canvas");
-    canvas.width = W;
-    canvas.height = H;
-    const ctx = canvas.getContext("2d");
-
-    ctx.fillStyle = "#FBF8F2";
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = "#8B5CF6";
-    ctx.fillRect(0, 0, W, 12);
-
-    let y = 74;
-    const logo = await loadLogoImage();
-    if (logo) {
-      ctx.drawImage(logo, 48, y - 38, 40, 40);
-      ctx.fillStyle = "#2E2A22";
-      ctx.font = "600 30px Fredoka, sans-serif";
-      ctx.fillText("rota", 48 + 40 + 14, y);
-    } else {
-      ctx.fillStyle = "#2E2A22";
-      ctx.font = "600 32px Fredoka, sans-serif";
-      ctx.fillText("rota", 48, y);
-    }
-
-    y += 34;
-    ctx.fillStyle = "#9C927F";
-    ctx.font = "600 15px Nunito, sans-serif";
-    ctx.fillText(isCredit ? "MONEY RECEIVED" : "MONEY SENT", 48, y);
-
-    y += 72;
-    ctx.fillStyle = isCredit ? "#1FC28B" : "#2E2A22";
-    ctx.font = "600 50px 'IBM Plex Mono', monospace";
-    ctx.fillText(`${isCredit ? "+" : "-"}${naira(txn.amount)}`, 48, y);
-
-    y += 38;
-    ctx.strokeStyle = "#EDE4D3";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(48, y);
-    ctx.lineTo(W - 48, y);
-    ctx.stroke();
-
-    y += 44;
-    for (const [label, value] of listRows) {
-      ctx.textAlign = "left";
-      ctx.fillStyle = "#9C927F";
-      ctx.font = "500 16px Nunito, sans-serif";
-      ctx.fillText(label, 48, y);
-
-      ctx.textAlign = "right";
-      ctx.fillStyle = "#2E2A22";
-      ctx.font = "600 16px Nunito, sans-serif";
-      ctx.fillText(String(value), W - 48, y);
-      y += rowH;
-    }
-    ctx.textAlign = "left";
-
-    y += 6;
-    ctx.strokeStyle = "#EDE4D3";
-    ctx.beginPath();
-    ctx.moveTo(48, y);
-    ctx.lineTo(W - 48, y);
-    ctx.stroke();
-
-    y += 42;
-    ctx.fillStyle = "#9C927F";
-    ctx.font = "italic 14px Nunito, sans-serif";
-    ctx.fillText("Money, on schedule. — Rota", 48, y);
-
-    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 0.95));
-  }
-
-  async function shareImage() {
-    setShareState("generating");
-    setImgError("");
-    try {
-      const blob = await buildReceiptImage();
-      if (!blob) throw new Error("Could not render image");
-      const file = new File([blob], `rota-receipt-${txn.id || Date.now()}.png`, { type: "image/png" });
-
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: "Rota receipt" });
-      } else {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 4000);
-      }
-    } catch (e) {
-      if (e?.name !== "AbortError") setImgError("Couldn't generate the receipt image. Try again.");
-    } finally {
-      setShareState("idle");
-    }
-  }
-
-  async function copyText() {
-    const text = [`Rota ${isCredit ? "receipt (received)" : "receipt (sent)"}`, ...rows.map(([l, v]) => `${l}: ${v}`)].join("\n");
-    try {
-      await navigator.clipboard.writeText(text);
-      setShareState("copied");
-      setTimeout(() => setShareState("idle"), 1500);
-    } catch {
-      // clipboard unavailable — no-op
-    }
-  }
 
   return (
-    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 25 }}>
-      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
-      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
-            Receipt
-          </h3>
-          <button onClick={onClose}>
-            <X size={18} color={T.muted} />
-          </button>
-        </div>
-
-        <div className="rounded-2xl p-4 mb-4" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
-          <div className="flex items-center gap-2 mb-3">
-            <div className="rounded-full flex items-center justify-center" style={{ width: 30, height: 30, background: T.ok }}>
-              {isCredit ? <ArrowDownLeft size={16} color={T.ink} /> : <ArrowUpRight size={16} color={T.ink} />}
-            </div>
-            <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm font-medium">
-              {isCredit ? "Money received" : "Money sent"}
-            </span>
-          </div>
-          <div className="flex flex-col gap-2">
-            {rows.map(([label, value]) => (
-              <ReceiptRow key={label} label={label} value={value} mono={label === "Amount" || label === "Reference"} />
-            ))}
-          </div>
-        </div>
-
-        {imgError && (
-          <p className="text-xs mb-2 text-center" style={{ color: T.warn, fontFamily: FONT_BODY }}>
-            {imgError}
-          </p>
-        )}
-        <button
-          onClick={shareImage}
-          disabled={shareState === "generating"}
-          className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 mb-2"
-          style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
-        >
-          {shareState === "generating" ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />}
-          {shareState === "generating" ? "Preparing image..." : "Share as image"}
-        </button>
-        <button onClick={copyText} className="w-full text-center text-xs py-1" style={{ color: T.muted, fontFamily: FONT_BODY }}>
-          {shareState === "copied" ? "Copied to clipboard" : "Copy as text instead"}
-        </button>
-      </div>
-    </div>
+    <ReceiptCardSheet
+      statusLabel={isCredit ? "Money received" : "Money sent"}
+      statusIcon={isCredit ? <ArrowDownLeft size={13} color={T.ok} /> : <ArrowUpRight size={13} color={T.ok} />}
+      amountText={`${isCredit ? "+" : "-"}${naira(txn.amount)}`}
+      amountColor={isCredit ? T.ok : T.paper}
+      primaryLabel={isCredit ? "From" : "To"}
+      primaryName={txn.counterparty_name || (isCredit ? "Bank transfer" : "Recipient")}
+      primarySubline={txn.counterparty_bank || null}
+      metaRows={metaRows}
+      copyLines={[
+        `Rota ${isCredit ? "receipt (received)" : "receipt (sent)"}`,
+        `Amount: ${isCredit ? "+" : "-"}${naira(txn.amount)}`,
+        `${isCredit ? "From" : "To"}: ${txn.counterparty_name || (isCredit ? "Bank transfer" : "Recipient")}`,
+        ...metaRows.map(([l, v]) => `${l}: ${v}`),
+      ]}
+      fileName={`rota-receipt-${txn.id || Date.now()}.png`}
+      onClose={onClose}
+    />
   );
 }
 
@@ -3566,6 +4573,7 @@ function TodoTab({ todos, onAdd, onToggle, onDelete }) {
 }
 
 function AddTodoSheet({ onClose, onSave }) {
+  useBackClose(onClose);
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -3711,12 +4719,13 @@ function AdvisorTab() {
 
 /* ---------- Profile tab ---------- */
 function TapReceiveModeSheet({ value, onSelect, onClose }) {
+  useBackClose(onClose);
   const options = [
     {
       key: "quick_accept",
       Icon: Bell,
-      title: "Notification",
-      description: "A tap drops a quick Accept/Decline notification — no need to open the app. Stays up for about a minute.",
+      title: "Notify",
+      description: "A tap drops a quick Accept/Decline notification — no need to open the app. Stays up for a few minutes.",
     },
     {
       key: "open_app",
@@ -3786,7 +4795,7 @@ function TapReceiveModeSheet({ value, onSelect, onClose }) {
   );
 }
 
-function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadAvatar, onBiometricChange, hasBiometricConfirm, email, onCardLinked }) {
+function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadAvatar, onBiometricChange, hasBiometricConfirm, email, onCardLinked, accountNumber }) {
   const [editingName, setEditingName] = useState(false);
   const [name, setName] = useState(settings.name);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
@@ -3798,7 +4807,27 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
   const [tapModeSheetOpen, setTapModeSheetOpen] = useState(false);
   const [bioBusy, setBioBusy] = useState(false);
   const [bioError, setBioError] = useState("");
+  const [editingField, setEditingField] = useState(null); // { key, label, type, options } | null
+  const [emailRevealed, setEmailRevealed] = useState(false);
+  const [accountCopied, setAccountCopied] = useState(false);
+  const [verifyOpen, setVerifyOpen] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [resetAuthOpen, setResetAuthOpen] = useState(false);
   const fileInputRef = useRef(null);
+
+  // These two overlays are plain inline JSX rather than separate sheet
+  // components, so they need their own useBackClose calls — every other
+  // sheet below registers its own via its component body.
+  useBackClose(() => setResetConfirmOpen(false), resetConfirmOpen);
+  useBackClose(() => setLinkOverlayOpen(false), linkOverlayOpen);
+
+  function copyAccountNumber() {
+    if (!accountNumber) return;
+    navigator.clipboard?.writeText(accountNumber).then(() => {
+      setAccountCopied(true);
+      setTimeout(() => setAccountCopied(false), 1500);
+    });
+  }
 
   async function enableBiometric() {
     setBioBusy(true);
@@ -3810,6 +4839,13 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
         const { data, error: enrollErr } = await supabase.functions.invoke("native-biometric-enroll", { body: {} });
         if (enrollErr || !data?.success) throw new Error((data && data.error) || "Couldn't enable biometrics.");
         await NativeBiometric.setCredentials({ username: "rota", password: data.secret, server: NATIVE_BIO_SERVER });
+        // Remembers which account this device's enrollment belongs to, so the
+        // signed-out login screen can offer a fingerprint quick-login for it.
+        const { data: userData } = await supabase.auth.getUser();
+        if (userData?.user) {
+          localStorage.setItem(NATIVE_BIO_USER_KEY, userData.user.id);
+          localStorage.setItem(NATIVE_BIO_LABEL_KEY, userData.user.email || "");
+        }
         onBiometricChange(true);
         return;
       }
@@ -3843,6 +4879,8 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
         setBioError("Couldn't remove biometrics.");
         return;
       }
+      localStorage.removeItem(NATIVE_BIO_USER_KEY);
+      localStorage.removeItem(NATIVE_BIO_LABEL_KEY);
       onBiometricChange(false);
       return;
     }
@@ -3980,6 +5018,100 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
             </button>
           )}
         </div>
+        {accountNumber && (
+          <button onClick={copyAccountNumber} className="flex items-center gap-2 mt-2.5 rounded-xl px-3 py-2" style={{ background: T.ink, border: `1px solid ${T.ink3}` }}>
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-[11px]">
+              Account Number
+            </span>
+            <span style={{ fontFamily: FONT_MONO, color: T.gold }} className="text-sm font-bold tracking-wide">
+              {accountNumber}
+            </span>
+            <Copy size={13} color={T.gold} />
+            {accountCopied && (
+              <span style={{ color: T.ok, fontFamily: FONT_BODY }} className="text-xs">
+                Copied
+              </span>
+            )}
+          </button>
+        )}
+      </div>
+
+      <div className="rounded-2xl overflow-hidden" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <Row icon={User} label="Full Name">
+          <button onClick={() => setEditingField({ key: "name", label: "Full Name", type: "text", value: settings.name })} className="flex items-center gap-1.5">
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs truncate max-w-[140px]">
+              {settings.name || "Add name"}
+            </span>
+            <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
+          </button>
+        </Row>
+        <Row icon={Smartphone} label="Mobile Number">
+          <div className="flex items-center gap-2">
+            {settings.phone && (
+              settings.phoneVerified ? (
+                <span className="flex items-center gap-1" style={{ color: T.ok, fontFamily: FONT_BODY }}>
+                  <ShieldCheck size={11} /> <span className="text-xs">Verified</span>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setVerifyOpen(true)}
+                  className="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                  style={{ background: `${T.gold}22`, color: T.gold, fontFamily: FONT_BODY }}
+                >
+                  Verify
+                </button>
+              )
+            )}
+            <button onClick={() => setEditingField({ key: "phone", label: "Mobile Number", type: "tel", value: settings.phone })} className="flex items-center gap-1.5">
+              <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                {settings.phone || "Add number"}
+              </span>
+              <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
+            </button>
+          </div>
+        </Row>
+        <Row icon={Pencil} label="Nickname">
+          <button onClick={() => setEditingField({ key: "nickname", label: "Nickname", type: "text", value: settings.nickname })} className="flex items-center gap-1.5">
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              {settings.nickname || "Add nickname"}
+            </span>
+            <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
+          </button>
+        </Row>
+        <Row icon={User} label="Gender">
+          <button
+            onClick={() => setEditingField({ key: "gender", label: "Gender", type: "options", options: ["Male", "Female", "Prefer not to say"], value: settings.gender })}
+            className="flex items-center gap-1.5"
+          >
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              {settings.gender || "Add gender"}
+            </span>
+            <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
+          </button>
+        </Row>
+        <Row icon={Clock} label="Date of Birth">
+          <button onClick={() => setEditingField({ key: "dateOfBirth", label: "Date of Birth", type: "date", value: settings.dateOfBirth })} className="flex items-center gap-1.5">
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              {maskDate(settings.dateOfBirth)}
+            </span>
+            <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
+          </button>
+        </Row>
+        <Row icon={ShieldCheck} label="Email">
+          <button onClick={() => setEmailRevealed((v) => !v)} className="flex items-center gap-1.5">
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              {emailRevealed ? email || "—" : maskEmail(email)}
+            </span>
+          </button>
+        </Row>
+        <Row icon={Landmark} label="Address">
+          <button onClick={() => setEditingField({ key: "address", label: "Address", type: "text", value: settings.address })} className="flex items-center gap-1.5">
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs truncate max-w-[140px]">
+              {settings.address || "Add address"}
+            </span>
+            <ChevronDown size={11} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
+          </button>
+        </Row>
       </div>
 
       <div className="rounded-2xl overflow-hidden" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
@@ -3999,7 +5131,11 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
             <ChevronDown size={14} color={T.muted} style={{ transform: "rotate(-90deg)" }} />
           </Row>
         </button>
-        <Row icon={Fingerprint} label="Biometric confirm">
+        <Row
+          icon={Fingerprint}
+          label="Biometric login"
+          sub={IS_NATIVE ? "Sign in and confirm payments with your fingerprint or face" : "Confirm payments with your device's biometrics"}
+        >
           {bioBusy ? (
             <Loader2 size={14} className="animate-spin" color={T.muted} />
           ) : hasBiometricConfirm ? (
@@ -4041,7 +5177,7 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
       )}
 
       <button
-        onClick={onReset}
+        onClick={() => setResetConfirmOpen(true)}
         className="rounded-2xl p-3.5 flex items-center gap-3"
         style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}
       >
@@ -4050,6 +5186,56 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
           Clear all data
         </span>
       </button>
+      {resetConfirmOpen && (
+        <div className="absolute inset-0 flex items-center justify-center px-6" style={{ zIndex: 24, background: "rgba(0,0,0,0.6)" }}>
+          <div className="rounded-2xl p-5 w-full max-w-sm" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+            <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-base font-semibold mb-2">
+              Clear all data?
+            </h3>
+            <p className="text-xs mb-4" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              This permanently deletes every scheduled Rota and to-do on this account. It can't be undone.{" "}
+              {settings.hasPin ? "You'll need to confirm with your PIN or biometrics next." : ""}
+            </p>
+            {!settings.hasPin && (
+              <p className="text-xs mb-4" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                Set a transaction PIN above before you can clear data.
+              </p>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setResetConfirmOpen(false)}
+                className="flex-1 rounded-xl py-2.5 text-sm font-semibold"
+                style={{ background: T.ink3, color: T.paper, fontFamily: FONT_BODY }}
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!settings.hasPin}
+                onClick={() => {
+                  setResetConfirmOpen(false);
+                  setResetAuthOpen(true);
+                }}
+                className="flex-1 rounded-xl py-2.5 text-sm font-semibold"
+                style={{ background: settings.hasPin ? T.warn : T.ink3, color: settings.hasPin ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
+              >
+                Yes, clear it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {resetAuthOpen && (
+        <ConfirmSheet
+          hasBiometric={hasBiometricConfirm}
+          title="Confirm to clear all data"
+          actionLabel="Confirm with PIN"
+          onClose={() => setResetAuthOpen(false)}
+          onConfirmed={() => {
+            setResetAuthOpen(false);
+            onReset();
+          }}
+        />
+      )}
 
       <button onClick={onLogout} className="rounded-2xl p-3.5 flex items-center gap-3" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
         <LogOut size={16} color={T.warn} />
@@ -4059,6 +5245,26 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
       </button>
 
       {pwSheetOpen && <PasswordChangeSheet onClose={() => setPwSheetOpen(false)} />}
+      {editingField && (
+        <EditFieldSheet
+          field={editingField}
+          onClose={() => setEditingField(null)}
+          onSave={(value) => {
+            // A phone that just changed can't still be the verified one.
+            onUpdate(editingField.key === "phone" ? { phone: value, phoneVerified: false } : { [editingField.key]: value });
+            setEditingField(null);
+          }}
+        />
+      )}
+      {verifyOpen && (
+        <PhoneVerifySheet
+          onClose={() => setVerifyOpen(false)}
+          onVerified={() => {
+            onUpdate({ phoneVerified: true });
+            setVerifyOpen(false);
+          }}
+        />
+      )}
       {tapModeSheetOpen && (
         <TapReceiveModeSheet
           value={settings.tapReceiveMode}
@@ -4114,6 +5320,7 @@ function ProfileTab({ settings, onUpdate, onLogout, onReset, onUnlink, onUploadA
 }
 
 function CardDetailSheet({ last4, hasPin, hasBiometric, onClose, onChangeCard }) {
+  useBackClose(onClose);
   const [confirming, setConfirming] = useState(false);
 
   return (
@@ -4200,6 +5407,7 @@ function PinInput({ label, value, onChange, autoFocus }) {
 }
 
 function PinSheet({ hasPin, onClose, onDone }) {
+  useBackClose(onClose);
   const [currentPin, setCurrentPin] = useState("");
   const [pin, setPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
@@ -4280,6 +5488,7 @@ function PinSheet({ hasPin, onClose, onDone }) {
 }
 
 function ConfirmSheet({ hasBiometric, onBack, onClose, onConfirmed, title = "Confirm to schedule", actionLabel = "Confirm with PIN" }) {
+  useBackClose(onBack || onClose);
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -4381,6 +5590,7 @@ function ConfirmSheet({ hasBiometric, onBack, onClose, onConfirmed, title = "Con
 }
 
 function PasswordChangeSheet({ onClose }) {
+  useBackClose(onClose);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -4472,14 +5682,21 @@ function PasswordChangeSheet({ onClose }) {
   );
 }
 
-function Row({ icon: Icon, label, children }) {
+function Row({ icon: Icon, label, sub, children }) {
   return (
     <div className="flex items-center justify-between px-4 py-3.5" style={{ borderBottom: `1px solid ${T.ink3}` }}>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 min-w-0">
         <Icon size={16} color={T.muted} />
-        <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm">
-          {label}
-        </span>
+        <div className="flex flex-col min-w-0">
+          <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-sm">
+            {label}
+          </span>
+          {sub && (
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-[11px]">
+              {sub}
+            </span>
+          )}
+        </div>
       </div>
       {children}
     </div>
@@ -4501,71 +5718,526 @@ function Toggle({ value, onChange }) {
   );
 }
 
+// One small edit sheet reused for every profile field (name, phone, nickname,
+// gender, date of birth, address) instead of five near-identical ones —
+// `field.type` switches between a plain text input, a numeric/tel input, a
+// native date picker, or a set of selectable option pills.
+function EditFieldSheet({ field, onClose, onSave }) {
+  useBackClose(onClose);
+  const [value, setValue] = useState(field.value || "");
+  const canSave = field.type === "options" ? !!value : String(value).trim().length > 0;
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 24 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            {field.label}
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+
+        {field.type === "options" ? (
+          <div className="flex flex-col gap-2 mb-4">
+            {field.options.map((opt) => (
+              <button
+                key={opt}
+                onClick={() => setValue(opt)}
+                className="rounded-xl px-3 py-2.5 text-sm text-left flex items-center justify-between"
+                style={{ background: T.ink, border: `1px solid ${value === opt ? T.gold : T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+              >
+                {opt}
+                {value === opt && <Check size={14} color={T.gold} />}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <input
+            autoFocus
+            type={field.type === "date" ? "date" : field.type === "tel" ? "tel" : "text"}
+            value={value}
+            onChange={(e) => setValue(field.type === "tel" ? e.target.value.replace(/\D/g, "").slice(0, 11) : e.target.value)}
+            placeholder={`Enter ${field.label.toLowerCase()}`}
+            className="w-full rounded-xl px-3 py-2.5 text-sm mb-4"
+            style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: field.type === "tel" ? FONT_MONO : FONT_BODY }}
+          />
+        )}
+
+        <button
+          disabled={!canSave}
+          onClick={() => onSave(value)}
+          className="w-full rounded-2xl py-3 font-semibold text-sm transition-transform active:scale-95"
+          style={{ background: canSave ? T.gold : T.ink3, color: canSave ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
+        >
+          Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Sends a code to the signed-in user's own account email (see
+// phone-verify-request) rather than the phone itself — no SMS provider
+// needed, since the email address is already proven by having signed up.
+function PhoneVerifySheet({ onClose, onVerified }) {
+  useBackClose(onClose);
+  const [sent, setSent] = useState(false);
+  const [code, setCode] = useState("");
+  const [sending, setSending] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState("");
+
+  async function sendCode() {
+    setSending(true);
+    setError("");
+    const { data, error: err } = await supabase.functions.invoke("phone-verify-request", { body: {} });
+    setSending(false);
+    if (err || !data?.ok) {
+      setError((data && data.error) || "Couldn't send a code.");
+      return;
+    }
+    setSent(true);
+  }
+
+  async function confirmCode() {
+    if (code.trim().length !== 6) {
+      setError("Enter the 6-digit code.");
+      return;
+    }
+    setVerifying(true);
+    setError("");
+    const { data, error: err } = await supabase.functions.invoke("phone-verify-confirm", { body: { code: code.trim() } });
+    setVerifying(false);
+    if (err || !data?.ok) {
+      setError((data && data.error) || "Incorrect code.");
+      return;
+    }
+    onVerified();
+  }
+
+  return (
+    <div className="absolute inset-0 flex flex-col justify-end" style={{ zIndex: 24 }}>
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.5)" }} onClick={onClose} />
+      <div className="relative rounded-t-3xl p-5 max-w-lg mx-auto w-full" style={{ background: T.ink2, border: `1px solid ${T.ink3}` }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-lg font-semibold">
+            Verify Mobile Number
+          </h3>
+          <button onClick={onClose}>
+            <X size={18} color={T.muted} />
+          </button>
+        </div>
+
+        {sent ? (
+          <>
+            <p className="text-xs mb-3" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              Enter the 6-digit code sent to your account email.
+            </p>
+            <input
+              autoFocus
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="000000"
+              inputMode="numeric"
+              className="w-full rounded-xl px-3 py-2.5 text-center text-lg tracking-[0.4em] mb-3"
+              style={{ background: T.ink, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+            />
+            {error && (
+              <p className="text-xs mb-3" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                {error}
+              </p>
+            )}
+            <button
+              disabled={code.length !== 6 || verifying}
+              onClick={confirmCode}
+              className="w-full rounded-2xl py-3 font-semibold text-sm transition-transform active:scale-95"
+              style={{ background: code.length === 6 ? T.gold : T.ink3, color: code.length === 6 ? T.ink2 : T.muted, fontFamily: FONT_BODY }}
+            >
+              {verifying ? "Verifying…" : "Verify"}
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="text-xs mb-4" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+              We'll send a 6-digit code to your account email to confirm this number is yours.
+            </p>
+            {error && (
+              <p className="text-xs mb-3" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                {error}
+              </p>
+            )}
+            <button
+              disabled={sending}
+              onClick={sendCode}
+              className="w-full rounded-2xl py-3 font-semibold text-sm transition-transform active:scale-95"
+              style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY }}
+            >
+              {sending ? "Sending…" : "Send code"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Auth ---------- */
+// Web keeps the normal page-redirect flow, back to the app's own origin.
+const OAUTH_REDIRECT_URL = "https://rota-app-zerubbabel1.vercel.app/";
+
+// Native opens Google's consent screen in the system browser (Google
+// actively blocks OAuth inside embedded WebViews) and needs to be handed
+// back to the app afterwards. An HTTPS App Link redirect looked like the
+// obvious choice here — rota-app-zerubbabel1.vercel.app is already verified
+// for that — but Android only intercepts an App Link on the *initial*
+// external navigation to it; a same-tab HTTP redirect chain (Google →
+// Supabase's callback → this URL) never re-triggers that interception, so
+// the browser just loaded the live website's own login screen instead of
+// handing anything back to the app. A custom URL scheme doesn't have that
+// carve-out — browsers always hand an unrecognized scheme to the OS to
+// route, redirect or not — which is why this is the scheme mobile OAuth
+// redirects normally use. Must also be added as a redirect URL in
+// Supabase's dashboard, and matches the intent-filter in
+// AndroidManifest.xml.
+const NATIVE_OAUTH_REDIRECT_URL = "com.rota.app://auth-callback";
+
 function AuthScreen() {
   const [mode, setMode] = useState("login");
+  // Login only — one field, auto-detects email vs. phone number by whether
+  // it contains "@" rather than making the user pick a mode first. Signup
+  // is always email, via the separate `email` field below.
+  const [identifier, setIdentifier] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [googleSubmitting, setGoogleSubmitting] = useState(false);
+  const [bioSubmitting, setBioSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [checkEmail, setCheckEmail] = useState(false);
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotSubmitting, setForgotSubmitting] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
+  const [forgotError, setForgotError] = useState("");
+  // Set only if THIS device previously enrolled biometrics for some account
+  // (see ProfileTab's enableBiometric) — a fresh install has neither key,
+  // which is exactly what should force the real password.
+  const [biometricUserId] = useState(() => (IS_NATIVE ? localStorage.getItem(NATIVE_BIO_USER_KEY) : null));
+  const [biometricLabel] = useState(() => (IS_NATIVE ? localStorage.getItem(NATIVE_BIO_LABEL_KEY) : null));
 
   async function submit() {
-    if (!email.trim() || !password || submitting) return;
-    setSubmitting(true);
-    setError("");
-    setCheckEmail(false);
     if (mode === "signup") {
+      if (!email.trim() || !password || submitting) return;
+      setSubmitting(true);
+      setError("");
+      setCheckEmail(false);
       const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
       if (error) setError(error.message);
       else if (!data.session) setCheckEmail(true);
-    } else {
-      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      setSubmitting(false);
+      return;
+    }
+    const trimmed = identifier.trim();
+    if (!trimmed || !password || submitting) return;
+    setSubmitting(true);
+    setError("");
+    setCheckEmail(false);
+    if (trimmed.includes("@")) {
+      const { error } = await supabase.auth.signInWithPassword({ email: trimmed, password });
       if (error) setError(error.message);
+    } else {
+      const phoneDigits = trimmed.replace(/\D/g, "");
+      const { data, error: fnError } = await supabase.functions.invoke("login-with-phone", { body: { phone: phoneDigits, password } });
+      if (fnError || !data?.ok) {
+        setError((data && data.error) || "Couldn't sign in.");
+      } else {
+        const { error: sessErr } = await supabase.auth.setSession({
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+        });
+        if (sessErr) setError(sessErr.message);
+      }
     }
     setSubmitting(false);
   }
 
+  async function submitForgotPassword() {
+    const trimmed = forgotEmail.trim();
+    if (!trimmed || forgotSubmitting) return;
+    setForgotSubmitting(true);
+    setForgotError("");
+    const { error } = await supabase.auth.resetPasswordForEmail(trimmed, {
+      redirectTo: IS_NATIVE ? NATIVE_OAUTH_REDIRECT_URL : OAUTH_REDIRECT_URL,
+    });
+    if (error) setForgotError(error.message);
+    else setForgotSent(true);
+    setForgotSubmitting(false);
+  }
+
+  // Signed-out biometric quick-login: proves the device's Keystore-held
+  // secret still matches what's on file (native-biometric-login), then
+  // exchanges that proof for a real session via Supabase's own magic-link
+  // token issuance rather than any custom-minted token.
+  async function loginWithBiometric() {
+    if (!biometricUserId || bioSubmitting) return;
+    setBioSubmitting(true);
+    setError("");
+    try {
+      await NativeBiometric.verifyIdentity({ title: "Log in to Rota", reason: "Confirm it's you" });
+      const creds = await NativeBiometric.getCredentials({ server: NATIVE_BIO_SERVER });
+      const { data, error: fnError } = await supabase.functions.invoke("native-biometric-login", {
+        body: { userId: biometricUserId, secret: creds.password },
+      });
+      if (fnError || !data?.ok) throw new Error((data && data.error) || "Couldn't sign in — use your password instead.");
+      const { error: verErr } = await supabase.auth.verifyOtp({ token_hash: data.token_hash, type: "magiclink" });
+      if (verErr) throw verErr;
+    } catch (e) {
+      const cancelled = e?.name === "NotAllowedError" || String(e?.message || "").toLowerCase().includes("cancel");
+      if (!cancelled) setError(e.message || "Couldn't sign in — use your password instead.");
+    } finally {
+      setBioSubmitting(false);
+    }
+  }
+
+  async function signInWithGoogle() {
+    if (googleSubmitting) return;
+    setGoogleSubmitting(true);
+    setError("");
+    try {
+      if (IS_NATIVE) {
+        const { data, error } = await supabase.auth.signInWithOAuth({
+          provider: "google",
+          options: { redirectTo: NATIVE_OAUTH_REDIRECT_URL, skipBrowserRedirect: true },
+        });
+        if (error) throw error;
+        console.log("[RotaAuth] got OAuth url:", data?.url);
+        if (data?.url) await Browser.open({ url: data.url });
+        else setGoogleSubmitting(false);
+        // Left spinning until either appUrlOpen's code exchange finishes
+        // (auth state changes and this screen unmounts) or the effect below
+        // notices the browser closed without that happening — there's no
+        // other signal for "the user backed out of the Google flow."
+      } else {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: "google",
+          options: { redirectTo: OAUTH_REDIRECT_URL },
+        });
+        if (error) throw error;
+      }
+    } catch (e) {
+      setError(e?.message || "Couldn't start Google sign-in.");
+      setGoogleSubmitting(false);
+    }
+  }
+
+  // Safety net for the native flow: if the user backs out of the system
+  // browser (or the redirect never makes it back) without completing sign-
+  // in, this is the only signal that the button should stop spinning —
+  // successful sign-in unmounts the screen before this would ever fire.
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    const sub = Browser.addListener("browserFinished", () => setGoogleSubmitting(false));
+    return () => {
+      sub.then((handle) => handle.remove());
+    };
+  }, []);
+
   return (
-    <div className="h-full flex flex-col justify-center px-7" style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}>
-      <span style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold mb-1">
+    <div
+      className="h-full flex flex-col justify-center px-7"
+      style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}
+    >
+      <div className="flex flex-col items-center mb-7">
+        <RotaMark size={52} />
+      </div>
+
+      <span style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold mb-1 text-center">
         {mode === "signup" ? "Create your account" : "Welcome back"}
       </span>
-      <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm mb-6">
-        {mode === "signup" ? "A few seconds and you're in." : "Log in to see your schedule."}
+      <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm mb-7 text-center">
+        {mode === "signup" ? "Money, on schedule. Let's get you set up." : "Money, on schedule. Good to see you again."}
       </p>
 
-      {checkEmail ? (
-        <p className="text-sm" style={{ color: T.ok, fontFamily: FONT_BODY }}>
+      {forgotOpen ? (
+        <div className="flex flex-col gap-3">
+          {forgotSent ? (
+            <p className="text-sm text-center" style={{ color: T.ok, fontFamily: FONT_BODY }}>
+              Check your email for a link to set a new password.
+            </p>
+          ) : (
+            <>
+              <p className="text-xs text-center mb-1" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                Enter the email on your account and we'll send you a link to set a new password.
+              </p>
+              <div>
+                <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  className="w-full rounded-xl px-3 py-2.5 text-sm"
+                  style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+                />
+              </div>
+              {forgotError && (
+                <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+                  {forgotError}
+                </p>
+              )}
+              <button
+                onClick={submitForgotPassword}
+                disabled={forgotSubmitting}
+                className="w-full rounded-2xl py-3.5 font-semibold text-sm mt-1 transition-transform active:scale-95"
+                style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY, boxShadow: `0 10px 24px -8px ${T.gold}` }}
+              >
+                {forgotSubmitting ? "Sending…" : "Send reset link"}
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => {
+              setForgotOpen(false);
+              setForgotSent(false);
+              setForgotError("");
+            }}
+            className="w-full text-center mt-1"
+            style={{ fontFamily: FONT_BODY }}
+          >
+            <span className="text-sm font-bold" style={{ color: T.ok }}>
+              Back to log in
+            </span>
+          </button>
+        </div>
+      ) : checkEmail ? (
+        <p className="text-sm text-center" style={{ color: T.ok, fontFamily: FONT_BODY }}>
           Check your email to confirm your account, then log in below.
         </p>
       ) : (
         <div className="flex flex-col gap-3">
-          <div>
-            <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
-              Email
-            </label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              className="w-full rounded-xl px-3 py-2.5 text-sm"
-              style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
-            />
+          {mode === "login" && biometricUserId && (
+            <>
+              <button
+                onClick={loginWithBiometric}
+                disabled={bioSubmitting}
+                className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2.5 transition-transform active:scale-95"
+                style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY, boxShadow: `0 10px 24px -8px ${T.gold}` }}
+              >
+                <Fingerprint size={18} />
+                {bioSubmitting ? "Confirming…" : biometricLabel ? `Log in as ${biometricLabel}` : "Log in with biometrics"}
+              </button>
+              <div className="flex items-center gap-3 my-1">
+                <div className="h-px flex-1" style={{ background: T.ink3 }} />
+                <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+                  or
+                </span>
+                <div className="h-px flex-1" style={{ background: T.ink3 }} />
+              </div>
+            </>
+          )}
+          <button
+            onClick={signInWithGoogle}
+            disabled={googleSubmitting}
+            className="w-full rounded-2xl py-3 font-semibold text-sm flex items-center justify-center gap-2.5 transition-transform active:scale-95"
+            style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+          >
+            {googleSubmitting ? (
+              <Loader2 size={17} className="animate-spin" />
+            ) : (
+              <svg width="17" height="17" viewBox="0 0 48 48" aria-hidden="true">
+                <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l5.7-5.7C34.6 6 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.3-.4-3.5z" />
+                <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.8 1.1 8 3l5.7-5.7C34.6 6 29.6 4 24 4 16.3 4 9.6 8.3 6.3 14.7z" />
+                <path fill="#4CAF50" d="M24 44c5.5 0 10.4-1.9 14.2-5.1l-6.6-5.4C29.6 35.5 26.9 36 24 36c-5.3 0-9.6-3.3-11.3-8l-6.6 5.1C9.5 39.6 16.2 44 24 44z" />
+                <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.3 5.7l6.6 5.4C41.5 36 44 30.6 44 24c0-1.3-.1-2.3-.4-3.5z" />
+              </svg>
+            )}
+            {googleSubmitting ? "Opening Google…" : "Continue with Google"}
+          </button>
+
+          <div className="flex items-center gap-3 my-1">
+            <div className="h-px flex-1" style={{ background: T.ink3 }} />
+            <span style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs">
+              or
+            </span>
+            <div className="h-px flex-1" style={{ background: T.ink3 }} />
           </div>
+
+          {mode === "login" ? (
+            <div>
+              <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+                Email or phone number
+              </label>
+              <input
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                placeholder="you@example.com or 080..."
+                autoCapitalize="none"
+                autoCorrect="off"
+                className="w-full rounded-xl px-3 py-2.5 text-sm"
+                style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_MONO }}
+              />
+            </div>
+          ) : (
+            <div>
+              <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+                Email
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                className="w-full rounded-xl px-3 py-2.5 text-sm"
+                style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+              />
+            </div>
+          )}
           <div>
             <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
               Password
             </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="At least 6 characters"
-              className="w-full rounded-xl px-3 py-2.5 text-sm"
-              style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 6 characters"
+                className="w-full rounded-xl pl-3 pr-10 py-2.5 text-sm"
+                style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-0 top-0 h-full px-3 flex items-center"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <EyeOff size={16} color={T.muted} /> : <Eye size={16} color={T.muted} />}
+              </button>
+            </div>
+            {mode === "login" && (
+              <button
+                type="button"
+                onClick={() => {
+                  setForgotEmail(identifier.includes("@") ? identifier.trim() : "");
+                  setForgotError("");
+                  setForgotSent(false);
+                  setForgotOpen(true);
+                }}
+                className="mt-1.5"
+              >
+                <span className="text-xs font-medium" style={{ color: T.muted, fontFamily: FONT_BODY }}>
+                  Forgot password?
+                </span>
+              </button>
+            )}
           </div>
           {error && (
             <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
@@ -4599,6 +6271,104 @@ function AuthScreen() {
           {mode === "signup" ? "Log in" : "Tap here to sign up"}
         </span>
       </button>
+    </div>
+  );
+}
+
+// Shown once a password-recovery link finishes establishing a session (see
+// passwordRecovery in RotaApp) — the recovery session is real and already
+// signed in, so this only needs to collect + save the new password, not
+// re-authenticate.
+function ResetPasswordScreen({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    if (submitting) return;
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords don't match.");
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    const { error: updateErr } = await supabase.auth.updateUser({ password });
+    setSubmitting(false);
+    if (updateErr) setError(updateErr.message);
+    else onDone();
+  }
+
+  return (
+    <div
+      className="h-full flex flex-col justify-center px-7"
+      style={{ background: T.ink, paddingTop: "max(40px, env(safe-area-inset-top))", paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}
+    >
+      <div className="flex flex-col items-center mb-7">
+        <RotaMark size={52} />
+      </div>
+      <span style={{ fontFamily: FONT_DISPLAY, color: T.paper }} className="text-2xl font-semibold mb-1 text-center">
+        Set a new password
+      </span>
+      <p style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-sm mb-7 text-center">
+        Choose a new password for your account.
+      </p>
+      <div className="flex flex-col gap-3">
+        <div>
+          <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+            New password
+          </label>
+          <div className="relative">
+            <input
+              type={showPassword ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="At least 6 characters"
+              className="w-full rounded-xl pl-3 pr-10 py-2.5 text-sm"
+              style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((v) => !v)}
+              className="absolute right-0 top-0 h-full px-3 flex items-center"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? <EyeOff size={16} color={T.muted} /> : <Eye size={16} color={T.muted} />}
+            </button>
+          </div>
+        </div>
+        <div>
+          <label style={{ fontFamily: FONT_BODY, color: T.muted }} className="text-xs block mb-1.5">
+            Confirm new password
+          </label>
+          <input
+            type={showPassword ? "text" : "password"}
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder="Re-enter your new password"
+            className="w-full rounded-xl px-3 py-2.5 text-sm"
+            style={{ background: T.ink2, border: `1px solid ${T.ink3}`, color: T.paper, fontFamily: FONT_BODY }}
+          />
+        </div>
+        {error && (
+          <p className="text-xs" style={{ color: T.warn, fontFamily: FONT_BODY }}>
+            {error}
+          </p>
+        )}
+        <button
+          onClick={submit}
+          disabled={submitting}
+          className="w-full rounded-2xl py-3.5 font-semibold text-sm mt-1 transition-transform active:scale-95"
+          style={{ background: T.gold, color: T.ink2, fontFamily: FONT_BODY, boxShadow: `0 10px 24px -8px ${T.gold}` }}
+        >
+          {submitting ? "Saving…" : "Save new password"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -4845,13 +6615,170 @@ export default function RotaApp() {
   const [payments, setPayments] = useState([]);
   const [todos, setTodos] = useState([]);
   const [settings, setSettings] = useState(defaultSettings());
+  // Lives here rather than inside HomeTab so Schedule can read the same
+  // schedule_balance/balance figures Home shows, not a second independently
+  // fetched copy that could ever disagree.
+  const [wallet, setWallet] = useState(null);
+  const [walletLoading, setWalletLoading] = useState(true);
+  const [walletTxns, setWalletTxns] = useState([]);
   // Native enrollment is device-local (Keystore-bound), unlike WebAuthn's
   // account-level registration — tracked separately so switching devices
   // doesn't inherit a stale "enrolled" state from one that never enrolled.
   const [nativeBioEnrolled, setNativeBioEnrolled] = useState(() => IS_NATIVE && localStorage.getItem(NATIVE_BIO_FLAG_KEY) === "1");
   const hasBiometricConfirm = IS_NATIVE ? nativeBioEnrolled : settings.biometricRegistered;
   const [tapClaimToken, setTapClaimToken] = useState(() => new URLSearchParams(window.location.search).get("tap"));
+  // Set once a password-recovery link finishes establishing a session
+  // (either via onAuthStateChange's PASSWORD_RECOVERY event on web, or the
+  // manual fallback in handleAuthCallbackUrl for native deep links) — takes
+  // over the screen so the user actually sets a new password instead of
+  // silently landing back in the app on the old one.
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
   const homeScrollRef = useRef(null);
+  const lastBackPressRef = useRef(0);
+  const [showExitToast, setShowExitToast] = useState(false);
+  const headerRef = useRef(null);
+  // Read inside the appStateChange listener below without re-subscribing it
+  // on every sign-in/out — the listener itself is only set up once.
+  const userRef = useRef(null);
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  // AppHeader is sticky within the scroll container (rota-header-glass), and
+  // Schedule's own stats card sticks right below it — but the header's real
+  // height varies per device (safe-area inset), so it's measured here rather
+  // than guessed, and exposed as a CSS variable the sticky card's `top` reads.
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const setVar = () => document.documentElement.style.setProperty("--rota-header-h", `${el.offsetHeight}px`);
+    setVar();
+    const ro = new ResizeObserver(setVar);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Shared by both listeners below — completes the sign-in from a callback
+  // URL. Handled two different-looking ways because Supabase's OAuth
+  // callback can come back in either shape depending on flow type: PKCE
+  // puts a "code" in the query string (needs a server round trip via
+  // exchangeCodeForSession), while implicit flow puts the actual
+  // access_token/refresh_token straight in the URL *fragment* (usable
+  // directly via setSession, no round trip needed) — confirmed from a live
+  // capture that this project's callback actually arrives in the fragment
+  // form, which a query-string-only parser silently ignored entirely.
+  // Guarded against re-running on the same result twice, since
+  // getLaunchUrl() keeps returning the same stale URL on every later
+  // resume, not just the one right after the redirect.
+  const lastOAuthResultRef = useRef(null);
+  const handleAuthCallbackUrl = useCallback((url) => {
+    try {
+      const u = new URL(url);
+      const params = u.searchParams;
+      const hashParams = new URLSearchParams(u.hash.replace(/^#/, ""));
+      const oauthError =
+        params.get("error_description") || params.get("error") || hashParams.get("error_description") || hashParams.get("error");
+      if (oauthError) console.error("[RotaAuth] OAuth callback error:", oauthError);
+
+      const type = hashParams.get("type") || params.get("type");
+
+      const accessToken = hashParams.get("access_token");
+      const refreshToken = hashParams.get("refresh_token");
+      if (accessToken && refreshToken) {
+        if (accessToken === lastOAuthResultRef.current) return;
+        lastOAuthResultRef.current = accessToken;
+        console.log("[RotaAuth] setting session from implicit-flow tokens");
+        Browser.close().catch(() => {});
+        supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken }).then(
+          ({ data, error }) => {
+            if (error) console.error("[RotaAuth] setSession failed:", error.message, error);
+            else {
+              console.log("[RotaAuth] setSession succeeded");
+              // Manual setSession doesn't fire onAuthStateChange's
+              // PASSWORD_RECOVERY event the way detectSessionInUrl does on
+              // web, so this is the native fallback for the same signal.
+              if (type === "recovery") {
+                setPasswordRecovery(true);
+                if (data?.session) loadUserData(data.session.user);
+              }
+            }
+          },
+          (e) => console.error("[RotaAuth] setSession threw:", e)
+        );
+        return;
+      }
+
+      // Email-action links (recovery, magic link, invite) use this shape
+      // rather than implicit-flow hash tokens or a PKCE "code".
+      const tokenHash = hashParams.get("token_hash") || params.get("token_hash");
+      if (tokenHash && type) {
+        if (tokenHash === lastOAuthResultRef.current) return;
+        lastOAuthResultRef.current = tokenHash;
+        console.log("[RotaAuth] verifying OTP token_hash, type:", type);
+        Browser.close().catch(() => {});
+        supabase.auth.verifyOtp({ token_hash: tokenHash, type }).then(
+          ({ data, error }) => {
+            if (error) console.error("[RotaAuth] verifyOtp failed:", error.message, error);
+            else {
+              console.log("[RotaAuth] verifyOtp succeeded");
+              if (type === "recovery") {
+                setPasswordRecovery(true);
+                if (data?.session) loadUserData(data.session.user);
+              }
+            }
+          },
+          (e) => console.error("[RotaAuth] verifyOtp threw:", e)
+        );
+        return;
+      }
+
+      const code = params.get("code");
+      if (!code || code === lastOAuthResultRef.current) return;
+      lastOAuthResultRef.current = code;
+      console.log("[RotaAuth] exchanging code, flowId param:", params.get("sb_flow_id"));
+      Browser.close().catch(() => {});
+      const flowId = params.get("sb_flow_id") || undefined;
+      supabase.auth.exchangeCodeForSession(code, flowId ? { flowId } : undefined).then(
+        ({ error }) => {
+          if (error) console.error("[RotaAuth] exchangeCodeForSession failed:", error.message, error);
+          else console.log("[RotaAuth] exchangeCodeForSession succeeded");
+        },
+        (e) => console.error("[RotaAuth] exchangeCodeForSession threw:", e)
+      );
+    } catch (e) {
+      console.error("[RotaAuth] handleAuthCallbackUrl error:", e);
+    }
+  }, []);
+
+  // Android hardware/gesture back button does nothing by default without an
+  // explicit listener. Priority: close the topmost open sheet/overlay (via
+  // the shared rotaBackStack, which cascades correctly for sheets nested
+  // inside other sheets, unwinding whatever was opened within the current
+  // tab one at a time) → once nothing is open, you're at that tab's own
+  // root — back does NOT switch to a different tab from here, it requires a
+  // second press within 2s to actually exit, showing a small toast on the
+  // first press, the same from every tab.
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    const sub = CapacitorApp.addListener("backButton", () => {
+      if (rotaBackStack.length > 0) {
+        const top = rotaBackStack[rotaBackStack.length - 1];
+        top();
+        return;
+      }
+      const now = Date.now();
+      if (now - lastBackPressRef.current < 2000) {
+        CapacitorApp.exitApp();
+        return;
+      }
+      lastBackPressRef.current = now;
+      setShowExitToast(true);
+      setTimeout(() => setShowExitToast(false), 2000);
+    });
+    return () => {
+      sub.then((handle) => handle.remove());
+    };
+  }, []);
 
   // App Links land here instead of a fresh page load, so pick the token
   // out of the launch URL by hand and feed it into the same state the
@@ -4859,45 +6786,75 @@ export default function RotaApp() {
   useEffect(() => {
     if (!IS_NATIVE) return;
     const sub = CapacitorApp.addListener("appUrlOpen", ({ url }) => {
+      console.log("[RotaAuth] appUrlOpen:", url);
       try {
         const token = new URL(url).searchParams.get("tap");
-        if (token) setTapClaimToken(token);
+        if (token) {
+          setTapClaimToken(token);
+          return;
+        }
       } catch {
         // not a URL we care about
       }
+      handleAuthCallbackUrl(url);
     });
     return () => {
       sub.then((handle) => handle.remove());
     };
-  }, []);
+  }, [handleAuthCallbackUrl]);
 
-  // Listens for a real NFC tap the whole time the app is open (paused only
-  // while this same device is mid-emulation as the sender — see
-  // TapSendSheet). Fully in-app: no OS tag-dispatch, no picker, no browser.
+  // Fallback for Google sign-in specifically: the browser opened by
+  // Browser.open() runs in the *same* task as the app, so Google/Supabase's
+  // redirect back to our custom scheme looks to Android like a normal
+  // back-navigation to an activity already on the stack, not a fresh
+  // intent — onNewIntent() (and therefore appUrlOpen above) never fires.
+  // getLaunchUrl() reads the intent directly instead of waiting on that
+  // event, so checking it on every resume catches this reliably.
+  //
+  // (Data-refresh-on-resume lives in a second effect further down, once
+  // loadUserData/refreshWallet exist — see the comment there.)
   useEffect(() => {
     if (!IS_NATIVE) return;
-    RotaNfcReader.startListening().catch(() => {});
-    const sub = RotaNfcReader.addListener("tapReceived", ({ url }) => {
-      try {
-        const token = new URL(url).searchParams.get("tap");
-        if (token) setTapClaimToken(token);
-      } catch {
-        // not a URL we care about
-      }
+    const sub = CapacitorApp.addListener("appStateChange", ({ isActive }) => {
+      if (!isActive) return;
+      CapacitorApp.getLaunchUrl()
+        .then((result) => {
+          if (result?.url) {
+            console.log("[RotaAuth] getLaunchUrl on resume:", result.url);
+            handleAuthCallbackUrl(result.url);
+          }
+        })
+        .catch(() => {});
     });
     return () => {
-      RotaNfcReader.stopListening().catch(() => {});
       sub.then((handle) => handle.remove());
     };
-  }, []);
+  }, [handleAuthCallbackUrl]);
 
-  // RotaTapReceiverActivity reads this preference natively (no JS running)
-  // the moment a background/closed-app tap comes in, so it has to be kept
-  // in sync here rather than looked up from Supabase at tap time.
+  // Open app mode's notification stashes its claim token natively rather
+  // than relying solely on the launch intent's own data — appUrlOpen above
+  // is built around an already-running app receiving a *new* intent, which
+  // isn't the same code path a cold start goes through, and that gap was
+  // why "open app" wasn't reliably landing on the Accept screen. Checking
+  // once on mount catches it regardless of whether the app was running.
   useEffect(() => {
     if (!IS_NATIVE) return;
-    RotaNfcReader.setTapReceiveMode({ mode: settings.tapReceiveMode || "quick_accept" }).catch(() => {});
-  }, [settings.tapReceiveMode]);
+    RotaNfcReader.getPendingClaim()
+      .then(({ token }) => {
+        if (token) setTapClaimToken(token);
+      })
+      .catch(() => {});
+  }, []);
+
+
+  // Starts this phone passively broadcasting its own receive identity —
+  // once started it keeps answering taps natively regardless of what screen
+  // is open, whether the app is backgrounded, or fully closed. Only needs
+  // starting once; TapSendSheet pauses/restarts it around an active send.
+  useEffect(() => {
+    if (!IS_NATIVE || !user || !settings.tapReceiveToken) return;
+    startReceiveBroadcast(settings.tapReceiveToken);
+  }, [user?.id, settings.tapReceiveToken]);
 
   // Registers this device for push notifications once signed in, so a
   // server-side function can notify this phone about a transaction even
@@ -4935,6 +6892,13 @@ export default function RotaApp() {
     let receivedListener = null;
     LocalNotifications.requestPermissions().catch(() => {});
     PushNotifications.addListener("pushNotificationReceived", (notification) => {
+      // open_app mode, app already open: just go straight to the Accept
+      // screen instead of making them tap a local notification first —
+      // there's nothing to auto-open, they're already looking at it.
+      if (notification.data?.type === "tap_open_app" && notification.data?.token) {
+        setTapClaimToken(notification.data.token);
+        return;
+      }
       LocalNotifications.schedule({
         notifications: [
           {
@@ -4951,10 +6915,24 @@ export default function RotaApp() {
       receivedListener = handle;
     });
 
+    // open_app mode, app backgrounded/closed: Android auto-displayed the
+    // system notification (has a "notification" block, unlike the data-only
+    // quick_accept push RotaMessagingService.kt handles natively) — tapping
+    // it opens the app, and this is what routes that tap to the Accept
+    // screen instead of just landing on whatever was last on screen.
+    let actionListener = null;
+    PushNotifications.addListener("pushNotificationActionPerformed", (action) => {
+      const data = action.notification?.data;
+      if (data?.type === "tap_open_app" && data?.token) setTapClaimToken(data.token);
+    }).then((handle) => {
+      actionListener = handle;
+    });
+
     return () => {
       regListener?.remove();
       errListener?.remove();
       receivedListener?.remove();
+      actionListener?.remove();
     };
   }, [user?.id]);
 
@@ -4972,7 +6950,7 @@ export default function RotaApp() {
     const [{ data: profileRow }, { data: paymentRows }, { data: todoRows }] = await Promise.all([
       supabase
         .from("profiles")
-        .select("id,name,notifications,biometric,card_linked,card_last4,avatar_url,has_pin,total_balance,dark_mode,card_link_skipped,tap_receive_mode")
+        .select("id,name,notifications,biometric,card_linked,card_last4,avatar_url,has_pin,total_balance,dark_mode,card_link_skipped,tap_receive_mode,tap_receive_token,referral_code,phone,phone_verified,nickname,gender,date_of_birth,address")
         .eq("id", authUser.id)
         .single(),
       supabase.from("payments").select("*").eq("user_id", authUser.id).order("date", { ascending: true }),
@@ -4995,6 +6973,54 @@ export default function RotaApp() {
     });
   }, []);
 
+  // dva-get-or-create-wallet attempts the real Paystack DVA call first and
+  // only falls back to a labeled preview account because the business isn't
+  // registered yet.
+  const loadWalletTxns = useCallback(async (walletId) => {
+    const { data } = await supabase
+      .from("dva_wallet_transactions")
+      .select("*")
+      .eq("wallet_id", walletId)
+      .order("created_at", { ascending: false })
+      .limit(100);
+    setWalletTxns(data || []);
+  }, []);
+
+  const refreshWallet = useCallback(async () => {
+    const { data, error } = await supabase.functions.invoke("dva-get-or-create-wallet", { body: {} });
+    if (!error && data?.wallet) {
+      setWallet(data.wallet);
+      await loadWalletTxns(data.wallet.id);
+    }
+    setWalletLoading(false);
+  }, [loadWalletTxns]);
+
+  useEffect(() => {
+    if (!user) return;
+    refreshWallet();
+    // Only re-run when the signed-in user actually changes — refreshWallet
+    // itself is called directly wherever a fresher read is needed (pull to
+    // refresh, right after a funded Rota moves money).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // Payments, todos, and the wallet were previously only ever fetched once,
+  // at sign-in — a Capacitor app isn't killed when backgrounded, so
+  // reopening it after any real gap just kept showing whatever was fetched
+  // at that one sign-in, however old, which is what looked like Schedule
+  // "not loading" or being slow. Refetching on every resume keeps it current.
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    const sub = CapacitorApp.addListener("appStateChange", ({ isActive }) => {
+      if (!isActive || !userRef.current) return;
+      loadUserData(userRef.current);
+      refreshWallet();
+    });
+    return () => {
+      sub.then((handle) => handle.remove());
+    };
+  }, [loadUserData, refreshWallet]);
+
   useEffect(() => {
     let alive = true;
     supabase.auth.getSession().then(({ data }) => {
@@ -5008,14 +7034,24 @@ export default function RotaApp() {
       }
     });
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === "SIGNED_IN" && session) {
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecovery(true);
+        if (session) loadUserData(session.user);
+      } else if (event === "SIGNED_IN" && session) {
         loadUserData(session.user);
       } else if (event === "SIGNED_OUT") {
         setUser(null);
         setSettings(defaultSettings());
         setPayments([]);
         setTodos([]);
+        setWallet(null);
+        setWalletTxns([]);
+        setWalletLoading(true);
         setScreen("welcome");
+        // RotaApp doesn't remount on sign-out, so tab would otherwise still
+        // be wherever it was left (often "profile", since that's where the
+        // log-out button lives) the next time someone signs back in.
+        setTab("home");
         if (IS_NATIVE) RotaNfcReader.clearSession().catch(() => {});
       }
       // Covers SIGNED_IN, TOKEN_REFRESHED, INITIAL_SESSION, USER_UPDATED —
@@ -5122,27 +7158,33 @@ export default function RotaApp() {
     },
     [user]
   );
-  const markPaymentPaid = useCallback((id) => {
-    const ref = `MANUAL-${Date.now().toString(36).toUpperCase()}`;
-    const paidAt = new Date().toISOString();
-    setPayments((prev) => prev.map((p) => (p.id === id ? { ...p, status: "paid", paid_at: paidAt, transaction_ref: ref } : p)));
-    supabase
-      .from("payments")
-      .update({ status: "paid", paid_at: paidAt, transaction_ref: ref })
-      .eq("id", id)
-      .then(({ error }) => {
-        if (error) console.error("Mark paid failed", error);
-      });
+  // Tops up Schedule Balance — either an internal move from Home's balance
+  // or a real card charge straight into it — see schedule-fund. Returns
+  // { ok } so ScheduleTab can show a failure inline.
+  const fundSchedule = useCallback(async (source, amount) => {
+    const { data, error } = await supabase.functions.invoke("schedule-fund", { body: { source, amount } });
+    if (error || !data?.ok) {
+      return { ok: false, error: (data && data.error) || "Couldn't fund Schedule Balance." };
+    }
+    setWallet((prev) => (prev ? { ...prev, balance: data.balance, schedule_balance: data.scheduleBalance } : prev));
+    return { ok: true };
   }, []);
-  const unmarkPaymentPaid = useCallback((id) => {
-    setPayments((prev) => prev.map((p) => (p.id === id ? { ...p, status: "upcoming", paid_at: null, transaction_ref: null } : p)));
-    supabase
-      .from("payments")
-      .update({ status: "upcoming", paid_at: null, transaction_ref: null })
-      .eq("id", id)
-      .then(({ error }) => {
-        if (error) console.error("Unmark paid failed", error);
-      });
+  // "Execute" pays the recipient out of Schedule Balance — see
+  // payments-mark-paid. recipient is only needed the first time a Manual
+  // Rota (created without one) is executed. Returns { ok } so ScheduleTab
+  // can show the failure inline and let the user retry.
+  const markPaymentPaid = useCallback(async (id, recipient) => {
+    const { data, error } = await supabase.functions.invoke("payments-mark-paid", {
+      body: { paymentId: id, ...(recipient || {}) },
+    });
+    if (error || !data?.ok) {
+      const message = (data && data.error) || "Couldn't complete this payout.";
+      setPayments((prev) => prev.map((p) => (p.id === id ? { ...p, charge_error: message } : p)));
+      return { ok: false, error: message };
+    }
+    setPayments((prev) => prev.map((p) => (p.id === id ? data.payment : p)));
+    setWallet((prev) => (prev ? { ...prev, schedule_balance: data.scheduleBalance } : prev));
+    return { ok: true };
   }, []);
   const editPayment = useCallback((id, updates) => {
     setPayments((prev) => prev.map((p) => (p.id === id ? { ...p, ...updates } : p)));
@@ -5304,6 +7346,14 @@ export default function RotaApp() {
       top: 0;
       z-index: 10;
     }
+    /* Stacks directly below rota-header-glass in the same scroll container —
+       --rota-header-h is measured off the real header (its height varies by
+       device safe-area) rather than a guessed constant. */
+    .rota-sticky-card {
+      position: sticky;
+      top: var(--rota-header-h, 64px);
+      z-index: 9;
+    }
   `;
 
   if (tapClaimToken) {
@@ -5322,6 +7372,20 @@ export default function RotaApp() {
               setTapClaimToken(null);
             }}
           />
+        </div>
+      </div>
+    );
+  }
+
+  if (passwordRecovery) {
+    return (
+      <div className="w-full flex justify-center" style={{ background: T.ink3, minHeight: "100vh" }}>
+        <style>{globalStyles}</style>
+        <div
+          className="rota-shell w-full sm:max-w-lg relative overflow-hidden"
+          style={{ background: T.ink, borderLeft: `1px solid ${T.ink3}`, borderRight: `1px solid ${T.ink3}` }}
+        >
+          <ResetPasswordScreen onDone={() => setPasswordRecovery(false)} />
         </div>
       </div>
     );
@@ -5373,30 +7437,53 @@ export default function RotaApp() {
           <div className="flex-1 overflow-y-auto rota-scroll-pad" ref={homeScrollRef}>
             <AppHeader
               title={{ home: "Rota", schedule: "Schedule", todo: "To-Do", advisor: "Advisor", profile: "Profile" }[tab]}
-              onProfile={tab !== "profile" ? () => setTab("profile") : undefined}
+              onProfile={() => setTab("profile")}
+              showAvatar={tab === "home"}
               avatarUrl={settings.avatarUrl}
               name={settings.name}
+              headerRef={headerRef}
             />
             <div className="max-w-2xl mx-auto w-full">
               {tab === "home" && (
-                <PullToRefresh scrollRef={homeScrollRef} onRefresh={() => loadUserData(user)}>
-                  <HomeTab payments={payments} settings={settings} goTab={setTab} onUpdate={updateSettings} user={user} hasBiometricConfirm={hasBiometricConfirm} />
+                <PullToRefresh
+                  scrollRef={homeScrollRef}
+                  onRefresh={() => Promise.all([loadUserData(user), refreshWallet()])}
+                >
+                  <HomeTab
+                    payments={payments}
+                    settings={settings}
+                    goTab={setTab}
+                    onUpdate={updateSettings}
+                    user={user}
+                    hasBiometricConfirm={hasBiometricConfirm}
+                    wallet={wallet}
+                    walletLoading={walletLoading}
+                    walletTxns={walletTxns}
+                    onWalletChange={setWallet}
+                    onReloadWalletTxns={loadWalletTxns}
+                  />
                 </PullToRefresh>
               )}
               {tab === "schedule" && (
-                <ScheduleTab
-                  payments={payments}
-                  onAdd={addPayment}
-                  onMarkPaid={markPaymentPaid}
-                  onUnmarkPaid={unmarkPaymentPaid}
-                  onEdit={editPayment}
-                  onDelete={deletePayment}
-                  onRetry={retryPayment}
-                  senderName={settings.name}
-                  hasPin={settings.hasPin}
-                  hasBiometric={hasBiometricConfirm}
-                  totalBalance={settings.totalBalance}
-                />
+                <PullToRefresh
+                  scrollRef={homeScrollRef}
+                  onRefresh={() => Promise.all([loadUserData(user), refreshWallet()])}
+                >
+                  <ScheduleTab
+                    payments={payments}
+                    onAdd={addPayment}
+                    onMarkPaid={markPaymentPaid}
+                    onEdit={editPayment}
+                    onDelete={deletePayment}
+                    onRetry={retryPayment}
+                    onFundSchedule={fundSchedule}
+                    onRefresh={() => Promise.all([loadUserData(user), refreshWallet()])}
+                    senderName={settings.name}
+                    hasPin={settings.hasPin}
+                    hasBiometric={hasBiometricConfirm}
+                    wallet={wallet}
+                  />
+                </PullToRefresh>
               )}
               {tab === "todo" && <TodoTab todos={todos} onAdd={addTodo} onToggle={toggleTodo} onDelete={deleteTodo} />}
               {tab === "advisor" && <AdvisorTab />}
@@ -5412,11 +7499,30 @@ export default function RotaApp() {
                   hasBiometricConfirm={hasBiometricConfirm}
                   email={user?.email}
                   onCardLinked={handleCardLinkedFromProfile}
+                  accountNumber={wallet?.virtual_account_number}
                 />
               )}
             </div>
           </div>
           <TabBar tab={tab} setTab={setTab} />
+          {showExitToast && (
+            <div
+              className="absolute left-1/2 flex items-center gap-2.5 rounded-full py-2.5 px-4"
+              style={{
+                bottom: 84,
+                transform: "translateX(-50%)",
+                background: T.ink2,
+                border: `1px solid ${T.ink3}`,
+                boxShadow: "0 10px 30px -8px rgba(0,0,0,0.5)",
+                zIndex: 40,
+              }}
+            >
+              <RotaMark size={18} />
+              <span style={{ fontFamily: FONT_BODY, color: T.paper }} className="text-xs font-medium whitespace-nowrap">
+                Tap back again to close Rota
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -82,7 +82,7 @@ Deno.serve(async (req) => {
       return json({ error: "Forbidden — internal use only" }, 403);
     }
 
-    const { userId, title, body, data } = await req.json();
+    const { userId, title, body, data, dataOnly } = await req.json();
     if (!userId || !title || !body) return json({ error: "Missing userId, title, or body" }, 400);
 
     const saJson = Deno.env.get("FCM_SERVICE_ACCOUNT_JSON");
@@ -105,17 +105,23 @@ Deno.serve(async (req) => {
     let sent = 0;
     await Promise.all(
       tokens.map(async ({ token }: { token: string }) => {
-        const resp = await fetch(`https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message: {
+        // Data-only messages (no "notification" block) skip Android's own
+        // auto-displayed system notification entirely — used when native
+        // code (RotaMessagingService) wants to be the only thing that shows
+        // UI for this message, e.g. the Accept/Decline Rota Tap banner.
+        const message: Record<string, unknown> = dataOnly
+          ? { token, data: data || {} }
+          : {
               token,
               notification: { title, body },
               data: data || {},
               android: { notification: { icon: "ic_stat_rota", color: "#0B1120" } },
-            },
-          }),
+            };
+
+        const resp = await fetch(`https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ message }),
         });
         if (resp.ok) {
           sent++;

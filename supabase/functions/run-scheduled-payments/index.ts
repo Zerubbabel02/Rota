@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { adjustWalletColumn, payOutToRecipient } from "../_shared/paystackPayout.ts";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -32,8 +33,8 @@ Deno.serve(async (req) => {
     const nowWAT = new Date(nowUtc.getTime() + 60 * 60 * 1000);
     const todayWAT = nowWAT.toISOString().slice(0, 10);
 
-    // Only automatic Rotas are auto-executed. Manual Rotas wait for the user
-    // to carry out the transfer themselves and mark it paid in the app.
+    // Only automatic Rotas are auto-executed. Manual Rotas are executed by
+    // the user tapping Execute (payments-mark-paid).
     // This is a broad candidate filter (date <= today) — the precise
     // date+time cutoff is applied below, since combining a date and time
     // column into one comparison isn't expressible through the query builder.
@@ -60,128 +61,81 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      const { data: method } = await supabaseAdmin
-        .from("payment_methods")
-        .select("*")
+      const { data: wallet } = await supabaseAdmin
+        .from("dva_wallets")
+        .select("id, schedule_balance")
         .eq("user_id", payment.user_id)
         .maybeSingle();
-
-      if (!method?.paystack_authorization_code) {
-        results.push({ payment_id: payment.id, outcome: "skipped_no_card" });
+      if (!wallet) {
+        results.push({ payment_id: payment.id, outcome: "skipped_no_wallet" });
         continue;
       }
 
-      const { data: userData } = await supabaseAdmin.auth.admin.getUserById(payment.user_id);
-      const email = userData?.user?.email;
-      if (!email) {
-        results.push({ payment_id: payment.id, outcome: "skipped_no_email" });
-        continue;
-      }
+      const amt = Number(payment.amount);
 
-      // Step 1: pull the funds in by charging the user's linked card.
-      // If a prior attempt already charged the card (charged_at is set) but
-      // only the transfer step failed, skip charging again on retry — the
-      // money is already in — and go straight to the transfer.
-      if (!payment.charged_at) {
-        const chargeRes = await fetch("https://api.paystack.co/transaction/charge_authorization", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${paystackSecretKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            authorization_code: method.paystack_authorization_code,
-            email,
-            amount: Math.round(Number(payment.amount) * 100),
-          }),
-        });
-        const chargeData = await chargeRes.json();
-        const chargeSuccess = chargeRes.ok && chargeData.status && chargeData.data?.status === "success";
-
-        if (!chargeSuccess) {
-          const errMsg = chargeData.data?.gateway_response || chargeData.message || "Charge failed";
-          await supabaseAdmin
-            .from("payments")
-            .update({ status: "failed", charge_error: errMsg })
-            .eq("id", payment.id);
-          results.push({ payment_id: payment.id, outcome: "charge_failed", error: errMsg });
-          continue;
-        }
-      }
-
-      // Step 2: push the funds out to the designated recipient account.
-      try {
-        let recipientCode = payment.paystack_recipient_code;
-        if (!recipientCode) {
-          const recipientRes = await fetch("https://api.paystack.co/transferrecipient", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${paystackSecretKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              type: "nuban",
-              name: payment.recipient_account_name || "Recipient",
-              account_number: payment.recipient_account_number,
-              bank_code: payment.recipient_bank_code,
-              currency: "NGN",
-            }),
-          });
-          const recipientData = await recipientRes.json();
-          if (!recipientRes.ok || !recipientData.status) {
-            throw new Error(recipientData.message || "Could not register recipient");
-          }
-          recipientCode = recipientData.data.recipient_code;
-          await supabaseAdmin
-            .from("payments")
-            .update({ paystack_recipient_code: recipientCode })
-            .eq("id", payment.id);
-        }
-
-        const transferRes = await fetch("https://api.paystack.co/transfer", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${paystackSecretKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            source: "balance",
-            amount: Math.round(Number(payment.amount) * 100),
-            recipient: recipientCode,
-            reason: payment.name,
-          }),
-        });
-        const transferData = await transferRes.json();
-        if (!transferRes.ok || !transferData.status) {
-          throw new Error(transferData.message || "Transfer failed");
-        }
-
+      // Pays out of Schedule Balance directly — no card charge here anymore.
+      // Rotas draw from whatever's already been funded into Schedule
+      // Balance via schedule-fund; if that's not enough, this Rota just
+      // fails and waits for a top-up + retry rather than falling back to
+      // the card.
+      const debitRef = `RS-${Date.now().toString(36).toUpperCase()}`;
+      const debitResult = await adjustWalletColumn(supabaseAdmin, wallet.id, "schedule_balance", Number(wallet.schedule_balance), -amt, {
+        type: "debit",
+        counterparty_name: payment.recipient_account_name,
+        description: `Rota payment — ${payment.name}`,
+        reference: debitRef,
+      });
+      if (!debitResult.ok) {
         await supabaseAdmin
           .from("payments")
-          .update({
-            status: "paid",
-            charged_at: new Date().toISOString(),
-            paid_at: new Date().toISOString(),
-            charge_error: null,
-            transaction_ref: transferData.data?.reference || transferData.data?.transfer_code || null,
-          })
+          .update({ status: "failed", charge_error: debitResult.error })
           .eq("id", payment.id);
-        results.push({ payment_id: payment.id, outcome: "paid" });
-      } catch (transferErr) {
-        // Card was already charged, so this needs a clear, distinct message —
-        // this is not a simple "retry" situation, it needs a human to look at it.
+        results.push({ payment_id: payment.id, outcome: "insufficient_schedule_balance", error: debitResult.error });
+        continue;
+      }
+
+      const payoutResult = await payOutToRecipient(
+        paystackSecretKey,
+        amt,
+        {
+          name: payment.recipient_account_name || "Recipient",
+          accountNumber: payment.recipient_account_number,
+          bankCode: payment.recipient_bank_code,
+        },
+        payment.paystack_recipient_code || null,
+        payment.name
+      );
+
+      if (!payoutResult.ok) {
+        await adjustWalletColumn(supabaseAdmin, wallet.id, "schedule_balance", debitResult.newValue, amt, {
+          type: "credit",
+          description: `Reversal — ${payment.name} payout failed`,
+          reference: `${debitRef}-REV`,
+        });
         await supabaseAdmin
           .from("payments")
           .update({
             status: "failed",
-            charged_at: new Date().toISOString(),
-            charge_error: `Card was charged but the transfer to the recipient failed: ${String(
-              (transferErr as Error).message || transferErr
-            )}. Contact support before retrying.`,
+            charge_error: `Transfer to the recipient failed: ${
+              (payoutResult as { error: string }).error
+            }. Contact support before retrying.`,
           })
           .eq("id", payment.id);
-        results.push({ payment_id: payment.id, outcome: "transfer_failed", error: String(transferErr) });
+        results.push({ payment_id: payment.id, outcome: "transfer_failed", error: (payoutResult as { error: string }).error });
+        continue;
       }
+
+      await supabaseAdmin
+        .from("payments")
+        .update({
+          status: "paid",
+          paid_at: new Date().toISOString(),
+          charge_error: null,
+          transaction_ref: payoutResult.reference,
+          paystack_recipient_code: payoutResult.recipientCode,
+        })
+        .eq("id", payment.id);
+      results.push({ payment_id: payment.id, outcome: "paid" });
     }
 
     return json({ processed: results.length, results });

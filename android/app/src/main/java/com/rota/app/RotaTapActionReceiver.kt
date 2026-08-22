@@ -21,6 +21,14 @@ class RotaTapActionReceiver : BroadcastReceiver() {
 
         if (intent.action != RotaNotifications.ACTION_ACCEPT) return
 
+        // Dismiss immediately, before the network call even starts — the
+        // claim itself is a real round trip (and can be slower still on a
+        // cold serverless function), and leaving the banner untouched for
+        // that whole stretch reads as "my tap didn't register," so people
+        // were tapping Accept repeatedly. The result notification below
+        // still lands once the claim actually finishes.
+        RotaNotifications.cancel(context, notificationId)
+
         val appContext = context.applicationContext
         val pendingResult = goAsync()
         Thread {
@@ -31,7 +39,7 @@ class RotaTapActionReceiver : BroadcastReceiver() {
                         appContext,
                         notificationId,
                         "Money received",
-                        "You received ${RotaTapReceiverActivity.formatNaira(result.amount)} via Rota Tap from ${result.senderName}."
+                        "You received ${RotaNotifications.formatNaira(result.amount)} via Rota Tap from ${result.senderName}."
                     )
                 } else {
                     RotaNotifications.showResult(

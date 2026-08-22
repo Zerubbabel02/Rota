@@ -8,17 +8,24 @@ import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import java.util.concurrent.atomic.AtomicBoolean
 
-// The "listen for a tap while the app is open" half of Rota Tap's NFC
-// transfer — pairs with RotaTapReceiverActivity, which handles the same
-// protocol (RotaTapProtocol) when the app is backgrounded/closed instead.
-// Also exposes storeSession/clearSession so the JS layer can keep native
-// code supplied with a fresh auth token for background quick-accept/
-// auto-accept claims.
+// Used only while actively sending: TapSendSheet reads the other phone's
+// passively-broadcast receive identity via enableReaderMode() (reliable —
+// unlike the OS's background tag dispatch, which this used to depend on for
+// receiving too, before that path proved unreliable across devices). Also
+// exposes storeSession/clearSession so the JS layer can keep native code
+// supplied with a fresh auth token for RotaTapActionReceiver's background
+// Accept/Decline claims.
 @CapacitorPlugin(name = "RotaNfcReader")
 class RotaNfcReaderPlugin : Plugin() {
     private var nfcAdapter: NfcAdapter? = null
     private var wantsListening = false
+    // Held phones get redetected several times a second by the reader-mode
+    // poll loop — without this guard each redetection raced its own
+    // readUrl() against the same IsoDep channel (see RotaTapReceiverActivity
+    // for the same fix on the background path).
+    private val isReading = AtomicBoolean(false)
 
     override fun load() {
         nfcAdapter = NfcAdapter.getDefaultAdapter(activity)
@@ -55,11 +62,20 @@ class RotaNfcReaderPlugin : Plugin() {
         call.resolve()
     }
 
+    // Open-app mode's notification launches MainActivity directly rather
+    // than relying on Capacitor's deep-link (appUrlOpen) handling, which is
+    // built around an already-running app receiving a *new* intent — a cold
+    // start goes through onCreate() instead, a path that wasn't reliably
+    // delivering the intent's data. Called once on app mount alongside the
+    // appUrlOpen listener, so a claim triggered this way is picked up
+    // regardless of whether the app was already running.
     @PluginMethod
-    fun setTapReceiveMode(call: PluginCall) {
-        val mode = call.getString("mode") ?: "quick_accept"
-        RotaSecureStore.saveTapReceiveMode(context, mode)
-        call.resolve()
+    fun getPendingClaim(call: PluginCall) {
+        val token = RotaNotifications.takePendingClaimToken(context)
+        android.util.Log.i("RotaNfcReaderPlugin", "getPendingClaim: token=$token")
+        val ret = JSObject()
+        ret.put("token", token)
+        call.resolve(ret)
     }
 
     override fun handleOnResume() {
@@ -99,11 +115,16 @@ class RotaNfcReaderPlugin : Plugin() {
     }
 
     private fun onTag(tag: Tag) {
-        val url = RotaTapProtocol.readUrl(tag) ?: return
-        activity?.runOnUiThread {
-            val ret = JSObject()
-            ret.put("url", url)
-            notifyListeners("tapReceived", ret)
+        if (!isReading.compareAndSet(false, true)) return
+        try {
+            val url = RotaTapProtocol.readUrl(tag) ?: return
+            activity?.runOnUiThread {
+                val ret = JSObject()
+                ret.put("url", url)
+                notifyListeners("tapReceived", ret)
+            }
+        } finally {
+            isReading.set(false)
         }
     }
 }

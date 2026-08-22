@@ -75,6 +75,12 @@ Deno.serve(async (req) => {
       return json({ error: "This link has expired." }, 400);
     }
     if (transfer.sender_user_id === receiverId) return json({ error: "You can't accept your own transfer." }, 400);
+    // Direct (non-QR) taps are locked to the specific phone that was tapped —
+    // QR/App-Links transfers leave receiver_user_id null and stay claimable
+    // by whoever has the link, same as before.
+    if (transfer.receiver_user_id && transfer.receiver_user_id !== receiverId) {
+      return json({ error: "This transfer isn't for your account." }, 403);
+    }
 
     const amt = Number(transfer.amount);
 
